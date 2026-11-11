@@ -1,0 +1,7 @@
+interface:
+  display_name: "Claude review loop"
+  short_description: "Have Claude Code review the current change and loop on its feedback"
+  default_prompt: "Use $review-loop-claude opus to have Claude Code review this change."
+
+policy:
+  allow_implicit_invocation: false

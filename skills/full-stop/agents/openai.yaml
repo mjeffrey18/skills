@@ -1,0 +1,6 @@
+interface:
+  display_name: "Full stop"
+  short_description: "Prepare a branch and wait before merging"
+  default_prompt: "Use $full-stop to prepare this branch and wait for my confirmation before merging."
+policy:
+  allow_implicit_invocation: false

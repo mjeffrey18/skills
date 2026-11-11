@@ -1,0 +1,4392 @@
+#!/usr/bin/env python3
+"""Deterministic inventory, validation and safe updates for GSD work items.
+
+Items live in .agents/gsd/<slug>/ while active and docs/gsd/YYYY/MM/<slug>/
+once closed (complete or cancelled), each with an IDEA.md whose front matter
+carries the item's lifecycle metadata. A compacted item is only a summary,
+docs/gsd/YYYY/MM/<slug>.md, and a folded item leaves nothing there; Git keeps
+the full record of both, and a GSD-Closed commit trailer names it. The old archive
+locations, .agents/gsd/YYYY/MM/ and .agents/gsd/archive/, are still read so
+`gsd prune` can move them. The record contract
+is skills/gsd/references/documents.md; this script encodes it and does not add
+stricter rules.
+
+Usage:
+    gsd [status] [--root DIR] [--all] [--format text|md|json] [--exclude GLOB]
+    gsd attention | next | progress | legacy   (same options)
+    gsd validate [ITEM ...] [--strict]
+    gsd comments [ITEM ...] [--assign]
+    gsd owner show|set|unset [CHECKOUT] [--item SLUG]
+    gsd new TITLE [--slug NAME] [--type T] [--purpose P] [--next-action A]
+    gsd set ITEM KEY=VALUE ... [--expect SHA256]
+    gsd plan ITEM (--write DOC | --set KEY=VALUE) [--expect SHA256]
+    gsd prune [ITEM ...] [--dry]
+    gsd compact ITEM [--dry]
+    gsd fold ITEM --record SHA [--dry]
+    gsd reopen ITEM [--stage S] [--delivery D] [--reason R] [--dry]
+    gsd agents (STAGE [NAME --body] | --all) [--root DIR] [--format text|md|json]
+    gsd risk PATH ... [--base REV] [--changed] [--root DIR] [--format text|json]
+    gsd fingerprints ITEM [--format text|json]
+
+The views and validate never write. Write commands act only in the owning
+checkout, under an advisory lock, with atomic replacement. No command stages,
+commits, switches branches or deploys; every Git call is a read-only query.
+Exit codes: 0 ok, 1 validation failure or refused change, 2 usage, 3 conflict.
+
+Standard library only (Python 3.10+), so it runs unchanged on macOS and Linux.
+"""
+
+import argparse
+import datetime
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import IO, Any, cast
+
+SCHEMA = 1
+PRUNED_DIRS = {".git", "node_modules"}
+PARKED_PREFIX = ".gsd-compact-"
+
+REQUIRED_FIELDS = (
+    "slug",
+    "title",
+    "purpose",
+    "type",
+    "stage",
+    "delivery",
+    "created",
+    "updated",
+    "version",
+    "next_action",
+    "responsible",
+)
+OPTIONAL_FIELDS = (
+    "complexity",
+    "priority",
+    "branches",
+    "parents",
+    "dependencies",
+    "blockers",
+    "completed",
+    "cancelled",
+    "close_method",
+)
+LIST_FIELDS = ("branches", "parents", "dependencies", "blockers")
+DATE_FIELDS = ("created", "updated", "completed", "cancelled")
+TYPES = ("feature", "goal")
+STAGES = ("ideation", "planning", "execution", "review", "complete")
+DELIVERIES = ("proposed", "ready", "in_progress", "implemented", "verified", "cancelled")
+RESPONSIBLE = ("human", "agent")
+CLOSE_METHODS = ("archive", "compact", "fold")
+TRAILER_KEY = "GSD-Closed"
+TIERS = ("L1", "L2", "L3")
+MAINTAINED_DOCS = ("DECISIONS.md", "PLAN.md", "SPEC.md", "TODO.md", "FACTS.md", "REVIEW.md", "FINAL.md")
+RESULTS = ("passed", "failed", "not_run", "blocked")
+DISPOSITIONS = ("open", "resolved", "accepted")
+
+EVIDENCE_LABELS = {
+    "criteria": ("criteria", "criterion", "acceptance", "acceptance scope"),
+    "result": ("result",),
+    "date": ("date",),
+    "revision": ("tested revision", "tested source", "tested commit", "tested snapshot", "revision", "snapshot"),
+    "environment": ("environment",),
+}
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ISO_IN_TEXT_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+FOLDER_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-[A-Za-z0-9][A-Za-z0-9._-]*$")
+VERSION_RE = re.compile(r"^[1-9]\d*$")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*)$")
+CHECKBOX_RE = re.compile(r"^\s*[-*+]\s+\[([ xX])\]")
+AC_ITEM_RE = re.compile(r"^\s*[-*+]\s+(?:\*\*)?(AC-\d+)\b")
+AC_HEAD_RE = re.compile(r"^(AC-\d+)\b")
+LABEL_RE = re.compile(r"(?:^|(?<=[.;]\s))\s*([A-Za-z][A-Za-z0-9 /_()-]{0,40}?)\s*:(?:\s+|$)")
+FULL_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SUPERSEDED_RE = re.compile(r"^superseded\b.*\b(close-out|conclusion|final)\b", re.IGNORECASE)
+
+
+class UsageError(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------
+# Parsing
+
+
+def diag(code, severity, file, message, line=None):
+    return {"code": code, "severity": severity, "file": file, "line": line, "message": message}
+
+
+def parse_front_matter(text):
+    """Return (meta, line_of_key, unsupported_lines, found, body_lines).
+
+    Supported subset: `key: value` scalars (optionally quoted), inline lists
+    [a, b], block lists of `- item`, blank lines and `#` comments.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return {}, {}, [], False, lines
+    end = None
+    for i in range(1, len(lines)):
+        if lines[i].rstrip() == "---":
+            end = i
+            break
+    if end is None:
+        return {}, {}, [], False, lines
+    meta, where, unsupported, key = {}, {}, [], None
+    flow = None  # (key, collected text) while a [ ... ] list spans lines
+    for i in range(1, end):
+        line, number = lines[i], i + 1
+        if flow is not None:
+            flow[1].append(strip_comment(line.strip()))
+            if line.strip().endswith("]"):
+                meta[flow[0]] = flow_list(" ".join(flow[1]))
+                flow = None
+            continue
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if key is not None and meta.get(key) == "" and line.strip().startswith("["):
+            flow = (key, [strip_comment(line.strip())])
+            if line.strip().endswith("]"):
+                meta[key] = flow_list(" ".join(flow[1]))
+                flow = None
+            continue
+        item = re.match(r"^\s+-\s+(.*)$", line) or re.match(r"^-\s+(.*)$", line)
+        if item and key is not None and meta.get(key) in ("", None) or item and isinstance(meta.get(key), list):
+            if not isinstance(meta.get(key), list):
+                meta[key] = []
+            meta[key].append(unquote(strip_comment(item.group(1))))
+            continue
+        pair = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", line)
+        if not pair:
+            unsupported.append((number, line))
+            key = None
+            continue
+        key, value = pair.group(1), strip_comment((pair.group(2) or "").strip())
+        where[key] = number
+        if value.startswith("[") and value.endswith("]"):
+            meta[key] = flow_list(value)
+        elif value.startswith("["):
+            flow = (key, [value])
+        elif value[:1] in ("|", ">") or value.startswith("{"):
+            unsupported.append((number, line))
+            meta[key] = value
+        else:
+            meta[key] = unquote(value)
+    if flow is not None:
+        unsupported.append((where.get(flow[0]), "%s: unterminated [ list" % flow[0]))
+        meta[flow[0]] = " ".join(flow[1])
+    return meta, where, unsupported, True, lines[end + 1 :]
+
+
+def flow_list(value):
+    """Split a [a, "b, c"] flow list, honouring quotes."""
+    inner, parts, current, quote = value.strip()[1:-1], [], "", None
+    for char in inner:
+        if quote:
+            current += char
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+            current += char
+        elif char == ",":
+            parts.append(current)
+            current = ""
+        else:
+            current += char
+    parts.append(current)
+    return [unquote(p.strip()) for p in parts if p.strip()]
+
+
+def strip_comment(value):
+    if value[:1] in ("'", '"'):
+        return value
+    return re.sub(r"\s+#.*$", "", value)
+
+
+def unquote(value):
+    """Undo YAML quoting: double quotes with JSON-style escapes, single quotes with ''."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+            if isinstance(decoded, str):
+                return decoded
+        except ValueError:
+            pass
+        return value[1:-1]
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def markdown_lines(text):
+    """Yield (line_number, line, in_code) for a Markdown document."""
+    fence = None
+    for number, line in enumerate(text.splitlines(), 1):
+        match = FENCE_RE.match(line)
+        if fence is None and match:
+            fence = match.group(1)[0] * len(match.group(1))
+            yield number, line, True
+            continue
+        if fence is not None:
+            if line.strip().startswith(fence) and set(line.strip()) <= {fence[0]}:
+                fence = None
+            yield number, line, True
+            continue
+        yield number, line, False
+
+
+def headings(text):
+    """Return [(line_number, level, text)] for headings outside code."""
+    out = []
+    for number, line, in_code in markdown_lines(text):
+        if in_code:
+            continue
+        match = HEADING_RE.match(line)
+        if match:
+            out.append((number, len(match.group(1)), match.group(2)))
+    return out
+
+
+def section_lines(text, title):
+    """Return the markdown_lines() entries under the first heading named `title`.
+
+    The section ends at the next heading of the same or a higher level. The
+    result is None when no such heading exists. Front matter is skipped, so a
+    YAML comment cannot pass for a heading.
+    """
+    _, _, _, found, body = parse_front_matter(text)
+    level, out = None, []
+    for entry in markdown_lines("\n".join(body) if found else text):
+        _, line, in_code = entry
+        heading = None if in_code else HEADING_RE.match(line)
+        if level is None:
+            if heading and heading.group(2).replace("**", "").strip().lower() == title.lower():
+                level = len(heading.group(1))
+        elif heading and len(heading.group(1)) <= level:
+            break
+        else:
+            out.append(entry)
+    return out if level is not None else None
+
+
+LIFECYCLE_BOX_RE = re.compile(r"^([ \t]*)(?:[-*+])\s+\[([ xX])\]\s+(.+?)\s*$")
+
+
+def lifecycle_entries(text):
+    entries = []
+    for number, line, in_code in section_lines(text, "Lifecycle") or []:
+        match = None if in_code else LIFECYCLE_BOX_RE.match(line)
+        if match:
+            entries.append(
+                {
+                    "indent": len(match.group(1)),
+                    "done": match.group(2).lower() == "x",
+                    "label": match.group(3),
+                    "line": number,
+                }
+            )
+    return entries
+
+
+def lifecycle_next(item):
+    if item.tier or item.meta.get("stage") == "ideation":
+        return next((e["label"] for e in lifecycle_entries(item.idea or "") if e["indent"] and not e["done"]), None)
+    return None
+
+
+def with_lifecycle_step(item, text):
+    step = lifecycle_next(item)
+    return text + (" | Next step: " + step if step else "")
+
+
+def validate_lifecycle(item):
+    if not item.tier:
+        return
+    path = os.path.join(item.path, "IDEA.md")
+    if section_lines(item.idea or "", "Lifecycle") is None:
+        item.diagnostics.append(diag("lifecycle-missing", "warning", path, "tiered item needs a Lifecycle checklist"))
+        return
+    entries = lifecycle_entries(item.idea or "")
+    stages = [e for e in entries if not e["indent"]]
+    names = [e["label"].lower() for e in stages]
+    current = item.meta.get("stage")
+    expected = list(STAGES)
+    if current == "ideation" and names == ["ideation"]:
+        expected = ["ideation"]
+    invalid = names != expected
+    stage = None
+    for entry in entries:
+        if not entry["indent"]:
+            stage = entry
+            name = entry["label"].lower()
+            if name in STAGES and current in STAGES:
+                should_tick = current == "complete" or STAGES.index(name) < STAGES.index(current)
+                invalid |= entry["done"] != should_tick
+        elif stage is None or (stage["done"] and not entry["done"]):
+            invalid = True
+    if invalid:
+        item.diagnostics.append(
+            diag("lifecycle-stage", "warning", path, "Lifecycle stage boxes or sub-tasks disagree with stage metadata")
+        )
+
+
+def lifecycle_reopen_entries(text, stage):
+    if stage not in STAGES:
+        raise Refused("cannot reopen an invalid stage; pass --stage with a valid stage")
+    return [
+        entry
+        for entry in lifecycle_entries(text)
+        if not entry["indent"] and entry["done"] and entry["label"].lower() in STAGES[STAGES.index(stage) :]
+    ]
+
+
+def reopen_lifecycle(text, stage):
+    lines = text.splitlines(keepends=True)
+    # section_lines numbers the body after front matter; writes use full-document indices.
+    body_offset = len(lines) - len(parse_front_matter(text)[4])
+    for entry in lifecycle_reopen_entries(text, stage):
+        index = body_offset + entry["line"] - 1
+        lines[index] = re.sub(r"\[[xX]\]", "[ ]", lines[index], count=1)
+    return "".join(lines)
+
+
+def acceptance_ids(lines):
+    found = set()
+    for _, line, in_code in lines:
+        if in_code:
+            continue
+        match = AC_ITEM_RE.match(line)
+        heading = HEADING_RE.match(line)
+        ac_heading = AC_HEAD_RE.match(heading.group(2)) if heading else None
+        if match:
+            found.add(match.group(1))
+        elif ac_heading:
+            found.add(ac_heading.group(1))
+    return found
+
+
+def task_counts(lines):
+    tasks = {"open": 0, "done": 0}
+    for _, line, in_code in lines:
+        match = None if in_code else CHECKBOX_RE.match(line)
+        if match:
+            tasks["done" if match.group(1) in "xX" else "open"] += 1
+    return tasks
+
+
+def record_sections(text, prefix):
+    """Return [(record_id, heading_line, [(line_number, line)])] for records.
+
+    A record is a heading of any level whose text begins with `<prefix>-NN`.
+    Its fields end at the next record heading of any level, or the next
+    heading of the same or a higher level, whichever comes first.
+    """
+    record_re = re.compile(r"^(?:\*\*)?(%s-\d+)\b" % re.escape(prefix))
+    body = [(n, line, code) for n, line, code in markdown_lines(text)]
+    marks = []
+    for n, line, code in body:
+        if code:
+            continue
+        match = HEADING_RE.match(line)
+        if match:
+            rid = record_re.match(match.group(2))
+            marks.append((n, len(match.group(1)), rid.group(1) if rid else None))
+    sections = []
+    for index, (n, level, rid) in enumerate(marks):
+        if rid is None:
+            continue
+        end = None
+        for n2, level2, rid2 in marks[index + 1 :]:
+            if rid2 is not None or level2 <= level:
+                end = n2
+                break
+        lines = [(m, line) for m, line, code in body if m > n and (end is None or m < end) and not code]
+        sections.append((rid, n, lines))
+    return sections
+
+
+def labels_in(lines):
+    """Return {label_lower: (value, line_number)} for bullet `Label: value` pairs."""
+    found = {}
+    items = []
+    for number, line in lines:
+        bullet = BULLET_RE.match(line)
+        if bullet:
+            items.append([number, bullet.group(1)])
+        elif items and line.strip() and line[:1].isspace() and items[-1][0] is not None:
+            items[-1][1] += " " + line.strip()
+        else:
+            if items:
+                items.append([None, ""])
+    for number, text in items:
+        if number is None:
+            continue
+        content = text.replace("**", "")
+        matches = list(LABEL_RE.finditer(content))
+        for i, match in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+            label = re.sub(r"\s+", " ", match.group(1).strip().lower())
+            value = content[match.end() : end].strip()
+            found.setdefault(label, (value, number))
+    return found
+
+
+def first_word(value):
+    match = re.match(r"^[`'\"(]*([A-Za-z_]+)", value.strip())
+    return match.group(1).lower() if match else ""
+
+
+def valid_date(value):
+    if not isinstance(value, str) or not DATE_RE.match(value):
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------
+# Discovery
+
+
+class Item:
+    def __init__(self, path, gsd_root, checkout, location):
+        self.path = path
+        self.folder = os.path.basename(path)
+        self.gsd_root = gsd_root
+        self.checkout = checkout
+        self.location = location
+        self.meta = {}
+        self.diagnostics = []
+        self.counts = {}
+        self.attention = []
+        self.blocked_by = []
+        self.docs = {}
+        self.repo = None
+        self.digest = None
+        self.copies = []
+        self.owner = None
+        self.approvals = {}
+        self.awaiting = []
+        self.comments = []
+        self.idea = None
+
+    @property
+    def tier(self):
+        """The confirmed complexity tier, or None for an untiered item."""
+        value = self.meta.get("complexity")
+        return value if value in TIERS else None
+
+    @property
+    def slug(self):
+        slug = self.meta.get("slug")
+        return slug if isinstance(slug, str) and slug else self.folder
+
+    def terminal(self):
+        return self.meta.get("stage") == "complete" or self.meta.get("delivery") == "cancelled"
+
+    def errors(self):
+        return sum(1 for d in self.diagnostics if d["severity"] == "error")
+
+    def warnings(self):
+        return sum(1 for d in self.diagnostics if d["severity"] == "warning")
+
+
+def gsd_root_of(path):
+    """Return the nearest enclosing .agents/gsd (active) or docs/gsd (closed) directory, or None."""
+    parts = path.split(os.sep)
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i] == "gsd" and parts[i - 1] in (".agents", "docs"):
+            return os.sep.join(parts[: i + 1])
+    return None
+
+
+def agents_dir_of(path):
+    parts = path.split(os.sep)
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == ".agents":
+            return os.sep.join(parts[: i + 1])
+    return None
+
+
+def checkout_of(item_path, agents_dir):
+    current = os.path.dirname(agents_dir)
+    probe = item_path
+    while True:
+        if os.path.exists(os.path.join(probe, ".git")):
+            return probe
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return current
+
+
+def active_root(item):
+    return os.path.join(os.path.dirname(os.path.dirname(item.gsd_root)), ".agents", "gsd")
+
+
+def closed_root(item):
+    return os.path.join(os.path.dirname(os.path.dirname(item.gsd_root)), "docs", "gsd")
+
+
+def location_of(item_path, gsd_root):
+    rel = os.path.relpath(item_path, gsd_root).split(os.sep)
+    dated = len(rel) == 3 and re.match(r"^\d{4}$", rel[0]) and re.match(r"^\d{2}$", rel[1])
+    if os.path.basename(os.path.dirname(gsd_root)) == "docs":
+        return "closed" if dated else "unexpected"
+    if len(rel) == 1:
+        return "active"
+    if dated or (len(rel) == 2 and rel[0] == "archive"):
+        return "legacy"
+    return "unexpected"
+
+
+def excluded(path, root, patterns):
+    rel = os.path.relpath(path, root)
+    name = os.path.basename(path)
+    return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(name, p) for p in patterns)
+
+
+def discover(root, excludes):
+    """Walk root; return (items, legacy, scan_errors)."""
+    idea_dirs, intent_dirs, errors, leftovers = [], [], [], []
+    stack = [(root, False)]
+    while stack:
+        current, under_agents = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError as error:
+            errors.append((os.path.abspath(current), str(error.strerror or error)))
+            continue
+        names, subdirs = set(), []
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False) and entry.name.startswith(PARKED_PREFIX):
+                    leftovers.append(os.path.abspath(entry.path))
+                elif entry.is_dir(follow_symlinks=False):
+                    if entry.name not in PRUNED_DIRS and not (excludes and excluded(entry.path, root, excludes)):
+                        subdirs.append(entry)
+                elif under_agents and entry.name in ("IDEA.md", "INTENT.md"):
+                    names.add(entry.name)
+            except OSError as error:
+                errors.append((os.path.abspath(entry.path), str(error.strerror or error)))
+        if "IDEA.md" in names:
+            idea_dirs.append(current)
+        elif "INTENT.md" in names:
+            intent_dirs.append(current)
+        for entry in sorted(subdirs, key=lambda e: e.name, reverse=True):
+            stack.append(
+                (
+                    entry.path,
+                    under_agents
+                    or entry.name == ".agents"
+                    or (entry.name == "gsd" and os.path.basename(current) == "docs"),
+                )
+            )
+
+    items, legacy = [], []
+    item_paths = []
+    gsd_candidates = sorted(d for d in idea_dirs if gsd_root_of(d) and d != gsd_root_of(d))
+    for path in gsd_candidates:
+        if any(path.startswith(p + os.sep) for p in item_paths):
+            continue
+        item_paths.append(path)
+    for path in item_paths:
+        gsd_root = gsd_root_of(path)
+        assert gsd_root is not None, path  # every candidate was found under a gsd root
+        agents = os.path.dirname(gsd_root)
+        items.append(Item(path, gsd_root, checkout_of(path, agents), location_of(path, gsd_root)))
+
+    def inside_item(path):
+        return any(path == p or path.startswith(p + os.sep) for p in item_paths)
+
+    for path in sorted(d for d in idea_dirs if not gsd_root_of(d)):
+        if inside_item(path):
+            continue
+        agents = agents_dir_of(path)
+        legacy.append(
+            {"kind": "idea-outside-gsd", "path": os.path.join(path, "IDEA.md"), "checkout": checkout_of(path, agents)}
+        )
+    for path in sorted(intent_dirs):
+        if inside_item(path):
+            continue
+        agents = agents_dir_of(path)
+        legacy.append(
+            {"kind": "intent", "path": os.path.join(path, "INTENT.md"), "checkout": checkout_of(path, agents)}
+        )
+    legacy.sort(key=lambda c: (c["checkout"], c["path"]))
+
+    scan = []
+    for path, message in errors:
+        owner = next((i for i in items if path == i.path or path.startswith(i.path + os.sep)), None)
+        entry = diag("read-error", "error", path, "could not read: %s" % message)
+        (owner.diagnostics if owner else scan).append(entry)
+    for path in leftovers:
+        scan.append(
+            diag(
+                "compact-leftover",
+                "warning",
+                path,
+                "an interrupted compaction left this folder; its content is in the summary's record commit",
+            )
+        )
+    items.sort(key=lambda i: (i.checkout, i.folder, i.path))
+    return items, legacy, scan
+
+
+# --------------------------------------------------------------------------
+# Validation
+
+
+def read_text(item, name):
+    path = os.path.join(item.path, name)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except (OSError, UnicodeDecodeError) as error:
+        item.diagnostics.append(diag("read-error", "error", path, "could not read: %s" % error))
+        return None
+
+
+def validate_idea(item, today, text=None):
+    path = os.path.join(item.path, "IDEA.md")
+    if text is None:
+        text = read_text(item, "IDEA.md")
+    if text is None:
+        return
+    item.idea = text
+    meta, where, unsupported, found, _ = parse_front_matter(text)
+    item.meta = meta
+    add = item.diagnostics.append
+    if not found:
+        add(diag("idea-front-matter", "error", path, "IDEA.md has no front matter block", 1))
+        return
+    for number, text in unsupported:
+        add(
+            diag(
+                "front-matter-unsupported", "warning", path, "unsupported front-matter line: %s" % text.strip(), number
+            )
+        )
+
+    def line(key):
+        return where.get(key)
+
+    for key in REQUIRED_FIELDS:
+        value = meta.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()) or value == []:
+            add(diag("idea-missing-field", "error", path, "required field %s is missing or empty" % key, line(key)))
+
+    def check(key, allowed):
+        value = meta.get(key)
+        if isinstance(value, str) and value and value not in allowed:
+            add(
+                diag(
+                    "idea-invalid-value",
+                    "error",
+                    path,
+                    "%s: %r is not one of %s" % (key, value, ", ".join(allowed)),
+                    line(key),
+                )
+            )
+        elif isinstance(value, list):
+            add(diag("idea-invalid-value", "error", path, "%s must be a single value" % key, line(key)))
+
+    check("type", TYPES)
+    check("stage", STAGES)
+    check("delivery", DELIVERIES)
+    check("responsible", RESPONSIBLE)
+    check("close_method", CLOSE_METHODS)
+    complexity = meta.get("complexity")
+    if complexity is not None and complexity not in TIERS:
+        add(
+            diag(
+                "idea-complexity",
+                "warning",
+                path,
+                "complexity: %r is not L1, L2 or L3; the item is treated as untiered" % (complexity,),
+                line("complexity"),
+            )
+        )
+    version = meta.get("version")
+    if isinstance(version, str) and version and not VERSION_RE.match(version) or isinstance(version, list):
+        add(
+            diag(
+                "idea-invalid-value",
+                "error",
+                path,
+                "version: %r is not a positive integer" % (version,),
+                line("version"),
+            )
+        )
+    dates = {}
+    for key in DATE_FIELDS:
+        value = meta.get(key)
+        if value in (None, ""):
+            continue
+        parsed = valid_date(value)
+        if parsed is None:
+            add(
+                diag(
+                    "idea-invalid-value",
+                    "error",
+                    path,
+                    "%s: %r is not a valid YYYY-MM-DD date" % (key, value),
+                    line(key),
+                )
+            )
+        else:
+            dates[key] = parsed
+    for key in LIST_FIELDS:
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            add(diag("idea-invalid-value", "error", path, "%s must be a list" % key, line(key)))
+
+    slug = meta.get("slug")
+    if isinstance(slug, str) and slug and slug != item.folder:
+        add(
+            diag(
+                "idea-slug-mismatch",
+                "error",
+                path,
+                "slug %r differs from folder name %r" % (slug, item.folder),
+                line("slug"),
+            )
+        )
+    folder = FOLDER_RE.match(item.folder)
+    if not folder or valid_date(folder.group(1)) is None:
+        add(
+            diag(
+                "idea-folder-name",
+                "warning",
+                item.path,
+                "folder name %r does not match YYYY-MM-DD-<name>" % item.folder,
+            )
+        )
+    elif "created" in dates and folder.group(1) != meta.get("created"):
+        add(
+            diag(
+                "idea-created-prefix",
+                "warning",
+                path,
+                "created %s differs from folder date %s" % (meta.get("created"), folder.group(1)),
+                line("created"),
+            )
+        )
+
+    stage, delivery = meta.get("stage"), meta.get("delivery")
+    completed, cancelled = meta.get("completed") not in (None, ""), meta.get("cancelled") not in (None, "")
+    state = []
+    if stage == "complete" and delivery == "cancelled":
+        state.append("stage complete with delivery cancelled; cancellation keeps its last active stage")
+    elif stage == "complete" and delivery != "verified":
+        state.append("stage complete requires delivery verified (found %s)" % delivery)
+    if stage == "complete" and not completed:
+        state.append("stage complete requires a completed date")
+    if completed and stage != "complete":
+        state.append("completed date present but stage is %s" % stage)
+    if delivery == "cancelled" and not cancelled:
+        state.append("delivery cancelled requires a cancelled date")
+    if cancelled and delivery != "cancelled":
+        state.append("cancelled date present but delivery is %s" % delivery)
+    for message in state:
+        add(diag("idea-state", "error", path, message, line("stage")))
+
+    created = dates.get("created")
+    for key in ("updated", "completed", "cancelled"):
+        if created and key in dates and dates[key] < created:
+            add(
+                diag(
+                    "idea-date-order",
+                    "error",
+                    path,
+                    "%s %s is earlier than created %s" % (key, dates[key], created),
+                    line(key),
+                )
+            )
+    for key, value in sorted(dates.items()):
+        if value > today:
+            add(diag("idea-future-date", "warning", path, "%s %s is in the future" % (key, value), line(key)))
+    known = set(REQUIRED_FIELDS) | set(OPTIONAL_FIELDS)
+    for key in sorted(meta):
+        if key not in known:
+            add(diag("idea-unknown-field", "warning", path, "unknown field %s" % key, line(key)))
+
+
+def validate_location(item):
+    path = os.path.join(item.path, "IDEA.md")
+    if item.location == "closed":
+        rel = os.path.relpath(item.path, item.gsd_root).split(os.sep)
+        key = "cancelled" if item.meta.get("delivery") == "cancelled" else "completed"
+        date = item.meta.get(key)
+        if not item.terminal():
+            item.diagnostics.append(
+                diag(
+                    "location-archive",
+                    "error",
+                    path,
+                    "item is in docs/gsd but is %s/%s" % (item.meta.get("stage"), item.meta.get("delivery")),
+                )
+            )
+        elif isinstance(date, str) and date[:7] != "%s-%s" % (rel[0], rel[1]):
+            item.diagnostics.append(
+                diag(
+                    "location-archive", "error", path, "archived under %s/%s but %s is %s" % (rel[0], rel[1], key, date)
+                )
+            )
+    elif item.location == "legacy":
+        item.diagnostics.append(
+            diag(
+                "location-legacy",
+                "warning",
+                item.path,
+                "item is in the old .agents/gsd archive; `gsd prune` moves it to docs/gsd",
+            )
+        )
+    elif item.location == "unexpected":
+        item.diagnostics.append(
+            diag(
+                "location-unexpected",
+                "warning",
+                item.path,
+                "item is not at .agents/gsd/<slug> or docs/gsd/YYYY/MM/<slug>",
+            )
+        )
+
+
+def validate_documents(item):
+    names = [n for n in MAINTAINED_DOCS if os.path.isfile(os.path.join(item.path, n))]
+    adrs = os.path.join(item.path, "ADRs")
+    if os.path.isdir(adrs):
+        try:
+            names += sorted(os.path.join("ADRs", n) for n in os.listdir(adrs) if n.endswith(".md"))
+        except OSError as error:
+            item.diagnostics.append(diag("read-error", "error", adrs, "could not read: %s" % error))
+    for name in names:
+        text = read_text(item, name)
+        if text is None:
+            continue
+        item.docs[name] = text
+        path = os.path.join(item.path, name)
+        meta, where, unsupported, found, _ = parse_front_matter(text)
+        for number, line in unsupported:
+            item.diagnostics.append(
+                diag(
+                    "front-matter-unsupported",
+                    "warning",
+                    path,
+                    "unsupported front-matter line: %s" % line.strip(),
+                    number,
+                )
+            )
+        problems = []
+        if not found:
+            problems.append("no front matter")
+        else:
+            if valid_date(meta.get("updated")) is None:
+                problems.append("updated is missing or not YYYY-MM-DD")
+            version = meta.get("version")
+            if not (isinstance(version, str) and VERSION_RE.match(version)):
+                problems.append("version is missing or not a positive integer")
+        for message in problems:
+            item.diagnostics.append(diag("doc-front-matter", "warning", path, message, 1))
+
+    stage, delivery = item.meta.get("stage"), item.meta.get("delivery")
+    final = os.path.join(item.path, "FINAL.md")
+    if stage == "complete" and "FINAL.md" not in item.docs and not os.path.isfile(final):
+        item.diagnostics.append(
+            diag(
+                "final-missing",
+                "error",
+                os.path.join(item.path, "IDEA.md"),
+                "stage complete but FINAL.md does not exist",
+            )
+        )
+    if "FINAL.md" in item.docs and stage != "complete" and delivery != "cancelled":
+        # Legacy records can have FINAL.md while delivery was still pending at review/verified.
+        delivering = (
+            stage == "review"
+            and delivery == "verified"
+            and section_lines(item.docs["FINAL.md"], "Delivery") is not None
+        )
+        if not delivering and not has_superseded_notice(item.docs["FINAL.md"]):
+            item.diagnostics.append(
+                diag(
+                    "final-premature",
+                    "warning",
+                    final,
+                    "FINAL.md exists but the item is %s/%s and FINAL.md has no superseded close-out notice "
+                    "(or Delivery section at review/verified)" % (stage, delivery),
+                )
+            )
+    if stage in ("execution", "review", "complete"):
+        message = None
+        missing = [n for n in ("PLAN.md", "SPEC.md", "TODO.md") if not os.path.isfile(os.path.join(item.path, n))]
+        if item.tier == "L1":
+            if section_lines(item.idea or "", "TODO") is None:
+                message = "L1 item at stage %s but IDEA.md has no TODO section" % stage
+        elif item.tier == "L2":
+            lacking = [n for n in ("PLAN.md", "TODO.md") if n in missing]
+            if lacking:
+                message = "L2 item at stage %s lacks %s" % (stage, " and ".join(lacking))
+        elif "PLAN.md" in missing and "SPEC.md" in missing:
+            message = "stage %s but neither PLAN.md nor SPEC.md exists" % stage
+        if message:
+            item.diagnostics.append(diag("plan-missing", "warning", os.path.join(item.path, "IDEA.md"), message))
+
+
+def has_superseded_notice(text):
+    _, _, _, found, body = parse_front_matter(text)
+    body_text = "\n".join(body) if found else text
+    before_first_h2 = True
+    for _, line, in_code in markdown_lines(body_text):
+        if in_code:
+            continue
+        heading = HEADING_RE.match(line)
+        if heading:
+            if SUPERSEDED_RE.match(heading.group(2).replace("**", "").strip()):
+                return True
+            if len(heading.group(1)) == 2:
+                before_first_h2 = False
+            continue
+        if before_first_h2:
+            candidate = re.sub(r"^[>\s]*", "", line).replace("**", "").strip()
+            if SUPERSEDED_RE.match(candidate):
+                return True
+    return False
+
+
+def validate_records(item):
+    facts = item.docs.get("FACTS.md")
+    evidence = {r: 0 for r in RESULTS}
+    evidence["other"] = 0
+    if facts is not None:
+        path = os.path.join(item.path, "FACTS.md")
+        for rid, number, lines in record_sections(facts, "E"):
+            found = labels_in(lines)
+            missing = []
+            for field, names in EVIDENCE_LABELS.items():
+                if not any(n in found for n in names):
+                    missing.append(field)
+            if not any(re.search(r"\bevidence\b", k) for k in found):
+                missing.append("evidence")
+            result = found.get("result")
+            if "date" in missing and result and ISO_IN_TEXT_RE.search(result[0]):
+                missing.remove("date")
+            if missing:
+                item.diagnostics.append(
+                    diag(
+                        "evidence-field",
+                        "warning",
+                        path,
+                        "%s has no %s field%s" % (rid, ", ".join(missing), "" if len(missing) == 1 else "s"),
+                        number,
+                    )
+                )
+            word = first_word(result[0]) if result else ""
+            if result and word not in RESULTS:
+                item.diagnostics.append(
+                    diag(
+                        "evidence-result",
+                        "warning",
+                        path,
+                        "%s result %r is not passed, failed, not_run or blocked" % (rid, result[0][:40]),
+                        result[1],
+                    )
+                )
+            evidence[word if word in RESULTS else "other"] += 1
+    review = item.docs.get("REVIEW.md")
+    findings = {d: 0 for d in DISPOSITIONS}
+    findings["other"] = 0
+    if review is not None:
+        path = os.path.join(item.path, "REVIEW.md")
+        for rid, number, lines in record_sections(review, "R"):
+            found = labels_in(lines)
+            value = found.get("disposition")
+            word = first_word(value[0]) if value else ""
+            if word not in DISPOSITIONS:
+                message = (
+                    ("%s has no Disposition" % rid)
+                    if not value
+                    else ("%s disposition %r is not open, resolved or accepted" % (rid, value[0][:40]))
+                )
+                item.diagnostics.append(
+                    diag("finding-disposition", "warning", path, message, value[1] if value else number)
+                )
+            elif value and word == "accepted" and re.search(r"(?i)\bfixed\b", value[0]):
+                # `gsd fingerprints` reads accepted as closed without a fix, so the repeat filter would misread it.
+                item.diagnostics.append(
+                    diag(
+                        "finding-disposition",
+                        "warning",
+                        path,
+                        "%s is accepted but says fixed: a fixed finding is resolved" % rid,
+                        value[1],
+                    )
+                )
+            elif value and word == "resolved" and found.get("filter"):
+                # Read as fixed, a filtered finding would later be kept as a possible regression of a fix never made.
+                item.diagnostics.append(
+                    diag(
+                        "finding-disposition",
+                        "warning",
+                        path,
+                        "%s is resolved but has a Filter: a filtered finding is accepted" % rid,
+                        value[1],
+                    )
+                )
+            findings[word if word in DISPOSITIONS else "other"] += 1
+            for code, message, line in finding_metadata_problems(rid, found, number):
+                item.diagnostics.append(diag(code, "warning", path, message, line))
+    todo, spec = item.docs.get("TODO.md"), item.docs.get("SPEC.md")
+    tasks = task_counts(markdown_lines(todo)) if todo is not None else {"open": 0, "done": 0}
+    acceptance = acceptance_ids(markdown_lines(spec)) if spec is not None else set()
+    if item.tier:
+        # SPEC.md wins when present, so a promoted item is not counted twice.
+        if spec is None:
+            for text, title in ((item.docs.get("PLAN.md"), "Acceptance"), (item.idea, "Success")):
+                acceptance |= acceptance_ids(section_lines(text or "", title) or [])
+        if todo is None:
+            tasks = task_counts(section_lines(item.idea or "", "TODO") or [])
+    item.counts = {
+        "tasks": tasks,
+        "acceptance": len(acceptance),
+        "evidence": evidence,
+        "findings": findings,
+    }
+
+
+def as_list(value):
+    if isinstance(value, list):
+        return [v for v in value if v]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def compacted(checkout):
+    """{slug: delivery} for the compacted summaries in checkout's docs/gsd/YYYY/MM/.
+
+    Unreadable directories are skipped: discover() already reports them.
+    """
+
+    def names(path):
+        try:
+            return sorted(os.listdir(path))
+        except OSError:
+            return []
+
+    found = {}
+    base = os.path.join(checkout, "docs", "gsd")
+    for year in names(base):
+        if not re.match(r"^\d{4}$", year):
+            continue
+        for month in names(os.path.join(base, year)):
+            folder = os.path.join(base, year, month)
+            if not re.match(r"^\d{2}$", month):
+                continue
+            for name in names(folder):
+                path = os.path.join(folder, name)
+                if not name.endswith(".md") or not FOLDER_RE.match(name[:-3]) or not os.path.isfile(path):
+                    continue
+                try:
+                    meta = parse_front_matter(read_doc(path)[0])[0]
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if meta.get("slug") == name[:-3]:
+                    found[name[:-3]] = meta.get("delivery")
+    for slug, fields in closed_trailers(checkout).items():
+        if slug not in found:
+            delivery = recorded_delivery(checkout, slug, fields.get("record"))
+            if delivery:
+                found[slug] = delivery
+    return found
+
+
+_TRAILERS = {}
+
+
+def closed_trailers(checkout):
+    """{slug: {method, delivery, record}} from GSD-Closed commit trailers, newest first wins.
+
+    A folded item leaves no file in docs/gsd, so its trailer is the only sign in
+    the checkout that it closed. Non-Git roots have none.
+    """
+    if checkout in _TRAILERS:
+        return _TRAILERS[checkout]
+    found = {}
+    if is_git_checkout(checkout):
+        code, out = git(
+            checkout,
+            "log",
+            "--fixed-strings",
+            "--grep=%s:" % TRAILER_KEY,
+            "--format=%%(trailers:key=%s,valueonly,unfold)" % TRAILER_KEY,
+        )
+        if code == 0:
+            for line in out.splitlines():
+                parsed = parse_trailer(line)
+                if parsed and parsed[0] not in found:
+                    found[parsed[0]] = parsed[1]
+    _TRAILERS[checkout] = found
+    return found
+
+
+def parse_trailer(value):
+    """(slug, fields) for a trailer value in the exact form closed_trailer() prints, else None.
+
+    A trailer can release a dependency gate, so any other form - a missing,
+    repeated or unknown field, or extra words - is ignored rather than guessed at.
+    """
+    words = value.split()
+    if not words or not FOLDER_RE.match(words[0]):
+        return None
+    fields = {}
+    for word in words[1:]:
+        key, sep, val = word.partition("=")
+        if not sep or not val or key in fields or key not in ("method", "delivery", "record"):
+            return None
+        fields[key] = val
+    method = fields.get("method")
+    if method not in CLOSE_METHODS or fields.get("delivery") not in ("verified", "cancelled"):
+        return None
+    record = fields.get("record")
+    if record is not None and not FULL_SHA_RE.match(record):
+        return None
+    if method != "archive" and record is None:
+        return None
+    return words[0], fields
+
+
+def recorded_delivery(checkout, slug, record):
+    """The closed delivery that the record commit's own IDEA.md states for slug, or None.
+
+    The trailer only points at the record; the record decides whether the item closed.
+    """
+    if not record:
+        return None
+    # The record may hold the item in a legacy layout (.agents/gsd/archive/ or YYYY/MM/), so find it.
+    code, out = git(checkout, "ls-tree", "-r", "--name-only", record, "--", ".agents/gsd")
+    ideas = [p for p in out.splitlines() if p.endswith("/%s/IDEA.md" % slug)] if code == 0 else []
+    if len(ideas) != 1:
+        return None
+    code, text = git(checkout, "show", "%s:%s" % (record, ideas[0]))
+    if code != 0:
+        return None
+    meta = parse_front_matter(text)[0]
+    if meta.get("slug") != slug:
+        return None
+    if meta.get("stage") == "complete" and meta.get("delivery") == "verified":
+        return "verified"
+    if meta.get("delivery") == "cancelled":
+        return "cancelled"
+    return None
+
+
+def closed_trailer(slug, method, delivery, record=None):
+    fields = ["method=%s" % method, "delivery=%s" % (delivery or "unknown")]
+    if record:
+        fields.append("record=%s" % record)
+    return "%s: %s %s" % (TRAILER_KEY, slug, " ".join(fields))
+
+
+def relate(items):
+    by_checkout, summaries = {}, {}
+    for item in items:
+        by_checkout.setdefault(item.checkout, {}).setdefault(item.folder, []).append(item)
+        if item.slug != item.folder:
+            by_checkout[item.checkout].setdefault(item.slug, []).append(item)
+    for item in items:
+        peers = by_checkout[item.checkout]
+        if item.checkout not in summaries:
+            summaries[item.checkout] = compacted(item.checkout)
+        closed = summaries[item.checkout]
+        path = os.path.join(item.path, "IDEA.md")
+        for key in ("parents", "dependencies"):
+            for slug in as_list(item.meta.get(key)):
+                if slug not in peers and slug not in closed:
+                    item.diagnostics.append(
+                        diag(
+                            "idea-relationship",
+                            "warning",
+                            path,
+                            "%s entry %r matches no item in this checkout" % (key, slug),
+                        )
+                    )
+        blocked = []
+        for slug in as_list(item.meta.get("dependencies")):
+            targets = peers.get(slug, [])
+            if not targets and slug in closed:
+                if closed[slug] != "verified":
+                    blocked.append(slug)
+            elif not targets:
+                blocked.append("%s (not found)" % slug)
+            elif not any(t.meta.get("stage") == "complete" for t in targets):
+                blocked.append(slug)
+        for blocker in as_list(item.meta.get("blockers")):
+            blocked.append(blocker)
+        item.blocked_by = blocked
+        if item.meta.get("type") == "goal":
+            children = {}
+            for other in items:
+                if (
+                    other.checkout == item.checkout
+                    and other is not item
+                    and (
+                        item.folder in as_list(other.meta.get("parents"))
+                        or item.slug in as_list(other.meta.get("parents"))
+                    )
+                ):
+                    delivery = other.meta.get("delivery")
+                    delivery = delivery if isinstance(delivery, str) and delivery else "unknown"
+                    children[delivery] = children.get(delivery, 0) + 1
+            item.counts["children"] = dict(sorted(children.items()))
+
+
+def compute_attention(items):
+    for item in items:
+        blocked = item.blocked_by
+        reasons = []
+        if item.errors():
+            reasons.append("%d error%s" % (item.errors(), "" if item.errors() == 1 else "s"))
+        if item.warnings():
+            reasons.append("%d warning%s" % (item.warnings(), "" if item.warnings() == 1 else "s"))
+        if item.meta.get("responsible") == "human":
+            reasons.append("responsible: human")
+        blockers = as_list(item.meta.get("blockers"))
+        if blockers:
+            reasons.append("blockers: %s" % "; ".join(blockers))
+        waiting = [b for b in blocked if b not in blockers]
+        if waiting:
+            reasons.append("dependency not complete: %s" % ", ".join(waiting))
+        open_findings = item.counts.get("findings", {}).get("open", 0)
+        if open_findings:
+            reasons.append("%d open finding%s" % (open_findings, "" if open_findings == 1 else "s"))
+        unresolved = sum(1 for c in item.comments if c["status"] != "resolved")
+        if unresolved:
+            reasons.append("%d unresolved comment%s" % (unresolved, "" if unresolved == 1 else "s"))
+        stale = item.counts.get("freshness", {}).get("stale", 0)
+        if stale:
+            reasons.append("%d stale evidence record%s" % (stale, "" if stale == 1 else "s"))
+        if item.terminal() and item.location in ("active", "legacy"):
+            reasons.append("ready to close out")
+        item.attention = reasons
+
+
+def build(root, excludes, git_checks=False):
+    items, legacy, scan = discover(root, excludes)
+    today = datetime.date.today()
+    for item in items:
+        validate_idea(item, today)
+        validate_location(item)
+        validate_documents(item)
+        validate_records(item)
+        validate_security_gate(item)
+        validate_lifecycle(item)
+    relate(items)
+    relate_copies(items, load_owners())
+    for item in items:
+        validate_comments(item)
+        approvals_of(item)
+        comments = {"unassigned": 0, "open": 0, "resolved": 0}
+        for c in item.comments:
+            comments[c["status"]] += 1
+        item.counts["comments"] = comments
+        if git_checks:
+            evidence_freshness(item)
+            stale_dates(item, today)
+    compute_attention(items)
+    for item in items:
+        item.diagnostics.sort(key=lambda d: (d["file"], d["line"] or 0, d["code"], d["message"]))
+    return items, legacy, scan
+
+
+# --------------------------------------------------------------------------
+# Views and output
+
+
+def visible(items, show_all, command=None):
+    """Hide terminal items unless --all, an error, or (attention) ready to prune."""
+
+    def shown(i):
+        if show_all or not i.terminal() or i.errors():
+            return True
+        return command == "attention" and i.location in ("active", "legacy")
+
+    return [i for i in items if shown(i)]
+
+
+def item_json(item):
+    return {
+        "slug": item.slug,
+        "path": item.path,
+        "checkout": item.checkout,
+        "location": item.location,
+        "meta": item.meta,
+        "counts": item.counts,
+        "attention": item.attention,
+        "blocked_by": item.blocked_by,
+        "diagnostics": item.diagnostics,
+        "repo": item.repo,
+        "digest": item.digest,
+        "copies": item.copies,
+        "owner": item.owner,
+        "approvals": item.approvals,
+        "awaiting": item.awaiting,
+        "lifecycle_next": lifecycle_next(item),
+    }
+
+
+def next_order(items):
+    blocked = [i for i in items if i.blocked_by]
+    awaiting = [i for i in items if not i.blocked_by and i.awaiting]
+    ready = [i for i in items if not i.blocked_by and not i.awaiting]
+    for group in (ready, awaiting):
+        group.sort(key=lambda i: (i.meta.get("responsible") != "human", i.checkout, i.folder))
+    return ready, awaiting, blocked
+
+
+def md_cell(value):
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def md_table(header, rows):
+    out = ["| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
+    for row in rows:
+        out.append("| " + " | ".join(md_cell(c) for c in row) + " |")
+    return out
+
+
+def scan_lines(scan, fmt):
+    out = []
+    for d in scan:
+        where = d["file"] + (":%d" % d["line"] if d["line"] else "")
+        text = "%s %s: %s (%s)" % (d["severity"], d["code"], d["message"], where)
+        label = "rules" if d["code"].startswith("rules-") else "scan"
+        out.append(("- %s %s" % (label, text)) if fmt == "md" else ("%s: %s" % (label, text)))
+    if out:
+        out.append("")
+    return out
+
+
+def counts_text(item):
+    c = item.counts
+    if not c:
+        return ""
+    tasks = c["tasks"]
+    parts = ["tasks %d/%d" % (tasks["done"], tasks["done"] + tasks["open"]), "AC %d" % c["acceptance"]]
+    ev = ", ".join("%s %d" % (k, v) for k, v in c["evidence"].items() if v)
+    fi = ", ".join("%s %d" % (k, v) for k, v in c["findings"].items() if v)
+    parts.append("evidence " + (ev or "none"))
+    parts.append("findings " + (fi or "none"))
+    if "children" in c:
+        parts.append("children " + (", ".join("%s %d" % kv for kv in c["children"].items()) or "none"))
+    return "; ".join(parts)
+
+
+def render(command, root, items, legacy, scan, fmt):
+    if fmt == "json":
+        payload = {"schema": SCHEMA, "command": command, "root": root, "diagnostics": scan}
+        if command == "legacy":
+            payload["items"] = []
+            payload["legacy"] = legacy
+        elif command == "next":
+            ready, awaiting, blocked = next_order(items)
+            payload["items"] = [item_json(i) for i in ready + awaiting + blocked]
+            payload["approvals_checked"] = True
+        elif command == "attention":
+            payload["items"] = [item_json(i) for i in items if i.attention]
+        else:
+            payload["items"] = [item_json(i) for i in items]
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+    out = scan_lines(scan, fmt)
+    if command == "legacy":
+        if fmt == "md":
+            out += md_table(["Checkout", "Kind", "Path"], [[c["checkout"], c["kind"], c["path"]] for c in legacy])
+        else:
+            for c in legacy:
+                out.append("%s  %s" % (c["kind"], c["path"]))
+        if not legacy:
+            out.append("No legacy candidates.")
+        return "\n".join(out) + "\n"
+
+    if command == "next":
+        ready, awaiting, blocked = next_order(items)
+        if fmt == "md":
+            out += ["## Ready", ""] + md_table(
+                ["Checkout", "Item", "Responsible", "Next action", "Next step"],
+                [
+                    [
+                        i.checkout,
+                        i.slug,
+                        i.meta.get("responsible", ""),
+                        i.meta.get("next_action", ""),
+                        lifecycle_next(i) or "",
+                    ]
+                    for i in ready
+                ],
+            )
+            out += ["", "## Awaiting approval", ""] + md_table(
+                ["Checkout", "Item", "Awaiting", "Next step"],
+                [[i.checkout, i.slug, "; ".join(i.awaiting), lifecycle_next(i) or ""] for i in awaiting],
+            )
+            out += ["", "## Blocked", ""] + md_table(
+                ["Checkout", "Item", "Blocked by", "Next step"],
+                [[i.checkout, i.slug, "; ".join(i.blocked_by), lifecycle_next(i) or ""] for i in blocked],
+            )
+        else:
+            out.append("Ready:")
+            out += [
+                "  %s  [%s]  %s  (%s)"
+                % (
+                    i.slug,
+                    i.meta.get("responsible", "?"),
+                    with_lifecycle_step(i, i.meta.get("next_action", "")),
+                    i.checkout,
+                )
+                for i in ready
+            ] or ["  none"]
+            out.append("Awaiting approval:")
+            out += [
+                "  %s  awaiting %s  (%s)" % (i.slug, with_lifecycle_step(i, "; ".join(i.awaiting)), i.checkout)
+                for i in awaiting
+            ] or ["  none"]
+            out.append("Blocked:")
+            out += [
+                "  %s  blocked by %s  (%s)" % (i.slug, with_lifecycle_step(i, "; ".join(i.blocked_by)), i.checkout)
+                for i in blocked
+            ] or ["  none"]
+        out += ["", "Approvals are read from DECISIONS.md bullets by a documented heuristic, not verified signatures."]
+        return "\n".join(out) + "\n"
+
+    if command == "attention":
+        rows = [i for i in items if i.attention]
+        if fmt == "md":
+            out += md_table(
+                ["Checkout", "Item", "Stage/delivery", "Reasons"],
+                [[i.checkout, i.slug, stage_of(i), "; ".join(i.attention)] for i in rows],
+            )
+        else:
+            for i in rows:
+                out.append("%s  %s  %s  (%s)" % (i.slug, stage_of(i), "; ".join(i.attention), i.checkout))
+        if not rows:
+            out.append("Nothing needs attention.")
+        return "\n".join(out) + "\n"
+
+    if command == "progress":
+        if fmt == "md":
+            out += md_table(
+                ["Checkout", "Item", "Stage/delivery", "Progress"],
+                [[i.checkout, i.slug, stage_of(i), counts_text(i)] for i in items],
+            )
+        else:
+            for i in items:
+                out.append("%s  %s  %s  (%s)" % (i.slug, stage_of(i), counts_text(i), i.checkout))
+        if not items:
+            out.append("No items.")
+        return "\n".join(out) + "\n"
+
+    # status
+    if fmt == "md":
+        out += md_table(
+            ["Checkout", "Item", "Stage/delivery", "Responsible", "Next action", "Errors", "Warnings"],
+            [
+                [
+                    i.checkout,
+                    i.slug,
+                    stage_of(i),
+                    i.meta.get("responsible", ""),
+                    i.meta.get("next_action", ""),
+                    i.errors(),
+                    i.warnings(),
+                ]
+                for i in items
+            ],
+        )
+    else:
+        current = None
+        for i in items:
+            if i.checkout != current:
+                current = i.checkout
+                out.append(current)
+            out.append(
+                "  %s  %s  %s  E%d W%d  %s"
+                % (
+                    i.slug,
+                    stage_of(i),
+                    i.meta.get("responsible", "?"),
+                    i.errors(),
+                    i.warnings(),
+                    i.meta.get("next_action", ""),
+                )
+            )
+    if not items:
+        out.append("No items.")
+    return "\n".join(out) + "\n"
+
+
+def stage_of(item):
+    return "%s/%s" % (item.meta.get("stage", "?"), item.meta.get("delivery", "?"))
+
+
+def render_validate(root, items, scan, fmt, strict):
+    all_diags = scan + [d for i in items for d in i.diagnostics]
+    errors = sum(1 for d in all_diags if d["severity"] == "error")
+    warnings = sum(1 for d in all_diags if d["severity"] == "warning")
+    failed = errors > 0 or (strict and warnings > 0)
+    if fmt == "json":
+        payload = {
+            "schema": SCHEMA,
+            "command": "validate",
+            "root": root,
+            "diagnostics": scan,
+            "items": [item_json(i) for i in items],
+            "errors": errors,
+            "warnings": warnings,
+            "ok": not failed,
+        }
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n", failed
+    out = scan_lines(scan, fmt)
+    for item in items:
+        out.append(("## %s" % item.slug) if fmt == "md" else item.path)
+        if fmt == "md":
+            out.append("")
+            out.append(item.path)
+            out.append("")
+        if not item.diagnostics:
+            out.append("  ok" if fmt != "md" else "- ok")
+        for d in item.diagnostics:
+            where = d["file"] + (":%d" % d["line"] if d["line"] else "")
+            out.append(
+                "%s%s %s: %s (%s)" % ("- " if fmt == "md" else "  ", d["severity"], d["code"], d["message"], where)
+            )
+        if fmt == "md":
+            out.append("")
+    out.append(
+        "%d item%s, %d error%s, %d warning%s"
+        % (
+            len(items),
+            "" if len(items) == 1 else "s",
+            errors,
+            "" if errors == 1 else "s",
+            warnings,
+            "" if warnings == 1 else "s",
+        )
+    )
+    return "\n".join(out) + "\n", failed
+
+
+# --------------------------------------------------------------------------
+# Phase 2: repository identity, owners and copies
+
+_IDENTITY = {}
+
+
+def git(checkout, *args):
+    """Run a read-only Git query; return (exit code, stdout)."""
+    try:
+        done = subprocess.run(["git", "-C", checkout] + list(args), capture_output=True, text=True, check=False)
+    except OSError:
+        return 127, ""
+    return done.returncode, done.stdout
+
+
+def is_git_checkout(path):
+    return os.path.exists(os.path.join(path, ".git"))
+
+
+def normalise_remote(url):
+    url = url.strip()
+    url = re.sub(r"^[a-z][a-z0-9+.-]*://", "", url, flags=re.IGNORECASE)
+    url = re.sub(r"^[^@/]+@", "", url)
+    if "/" in url.split(":", 1)[0] or ":" not in url:
+        host, _, rest = url.partition("/")
+    else:
+        host, _, rest = url.partition(":")
+    host = re.sub(r":\d+$", "", host).lower()
+    rest = re.sub(r"\.git/?$", "", rest.strip("/"))
+    return "%s/%s" % (host, rest)
+
+
+def repo_identity(checkout):
+    if checkout in _IDENTITY:
+        return _IDENTITY[checkout]
+    identity = "dir:%s" % os.path.realpath(checkout)
+    if is_git_checkout(checkout):
+        code, out = git(checkout, "config", "--get", "remote.origin.url")
+        if code == 0 and out.strip():
+            identity = "remote:%s" % normalise_remote(out)
+        else:
+            code, out = git(checkout, "rev-parse", "--git-common-dir")
+            if code == 0 and out.strip():
+                common = out.strip()
+                if not os.path.isabs(common):
+                    common = os.path.join(checkout, common)
+                identity = "gitdir:%s" % os.path.realpath(common)
+    _IDENTITY[checkout] = identity
+    return identity
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path):
+    try:
+        with open(path, "rb") as handle:
+            return sha256_bytes(handle.read())
+    except OSError:
+        return None
+
+
+def item_documents(item_path):
+    names = ["IDEA.md"] + list(MAINTAINED_DOCS)
+    found = [n for n in names if os.path.isfile(os.path.join(item_path, n))]
+    adrs = os.path.join(item_path, "ADRs")
+    if os.path.isdir(adrs):
+        found += sorted(os.path.join("ADRs", n) for n in os.listdir(adrs) if n.endswith(".md"))
+    return found
+
+
+def content_digest(item_path):
+    parts = []
+    for name in item_documents(item_path):
+        parts.append("%s %s" % (name, sha256_file(os.path.join(item_path, name))))
+    return sha256_bytes("\n".join(parts).encode())
+
+
+def owners_path():
+    if os.environ.get("GSD_OWNERS"):
+        return os.environ["GSD_OWNERS"]
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "gsd", "owners.json")
+
+
+def load_owners():
+    path = owners_path()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise UsageError("cannot read owner mapping %s: %s" % (path, error))
+    return [o for o in data.get("owners", []) if isinstance(o, dict) and o.get("repo") and o.get("checkout")]
+
+
+def mapped_owner(owners, identity, slug):
+    for entry in owners:
+        if entry["repo"] == identity and entry.get("slug") == slug:
+            return entry
+    for entry in owners:
+        if entry["repo"] == identity and not entry.get("slug"):
+            return entry
+    return None
+
+
+def relate_copies(items, owners):
+    groups = {}
+    for item in items:
+        item.repo = repo_identity(item.checkout)
+        item.digest = sha256_file(os.path.join(item.path, "IDEA.md"))
+        groups.setdefault((item.repo, item.folder), []).append(item)
+    for item in items:
+        peers = [p for p in groups[(item.repo, item.folder)] if p.checkout != item.checkout]
+        mine = content_digest(item.path)
+        item.copies = [
+            {"path": p.path, "checkout": p.checkout, "state": "same" if content_digest(p.path) == mine else "differs"}
+            for p in peers
+        ]
+        idea = os.path.join(item.path, "IDEA.md")
+        entry = mapped_owner(owners, item.repo, item.folder)
+        if entry:
+            item.owner = entry["checkout"]
+            if not os.path.isdir(entry["checkout"]) or repo_identity(entry["checkout"]) != item.repo:
+                item.diagnostics.append(
+                    diag(
+                        "owner-stale",
+                        "error",
+                        owners_path(),
+                        "mapped owner %s does not exist or is another repository" % entry["checkout"],
+                    )
+                )
+        elif item.copies:
+            item.owner = None
+            item.diagnostics.append(
+                diag(
+                    "owner-missing",
+                    "warning",
+                    idea,
+                    "copies exist in %d other checkout(s) and no owner is mapped" % len(item.copies),
+                )
+            )
+        else:
+            item.owner = item.checkout
+        if any(c["state"] == "differs" for c in item.copies):
+            item.diagnostics.append(
+                diag(
+                    "copy-divergent",
+                    "warning",
+                    idea,
+                    "copies differ: %s" % ", ".join(c["path"] for c in item.copies if c["state"] == "differs"),
+                )
+            )
+
+
+# --------------------------------------------------------------------------
+# Phase 2: safe writes
+
+
+class Conflict(Exception):
+    pass
+
+
+class Refused(Exception):
+    pass
+
+
+def state_dir():
+    if os.environ.get("GSD_STATE_DIR"):
+        return os.environ["GSD_STATE_DIR"]
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "gsd")
+
+
+class Lock:
+    """Advisory fcntl lock keyed by repository identity and slug."""
+
+    def __init__(self, key):
+        import fcntl
+
+        self.fcntl = fcntl
+        folder = os.path.join(state_dir(), "locks")
+        os.makedirs(folder, exist_ok=True)
+        self.path = os.path.join(folder, sha256_bytes(key.encode()) + ".lock")
+        self.handle: IO[str] | None = None
+
+    def __enter__(self):
+        import time
+
+        timeout = float(os.environ.get("GSD_LOCK_TIMEOUT", "5"))
+        handle = self.handle = open(self.path, "a+")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self.fcntl.flock(handle, self.fcntl.LOCK_EX | self.fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise Conflict("another writer holds the lock (%s)" % self.path)
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        assert self.handle is not None  # set by __enter__
+        self.fcntl.flock(self.handle, self.fcntl.LOCK_UN)
+        self.handle.close()
+
+
+def read_doc(path):
+    """Return (text with LF line endings, uses CRLF, SHA-256 of the raw bytes)."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return raw.decode("utf-8").replace("\r\n", "\n"), b"\r\n" in raw, sha256_bytes(raw)
+
+
+def encode_doc(text, crlf):
+    return text.replace("\n", "\r\n") if crlf else text
+
+
+def atomic_write(path, text, expect=None):
+    """Replace path with text (str or bytes) atomically; refuse if its digest differs from expect."""
+    current = sha256_file(path) if os.path.exists(path) else None
+    if expect is not None and current != expect:
+        raise Conflict("%s changed: expected %s, found %s" % (path, expect, current))
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    mode = os.stat(path).st_mode & 0o7777 if os.path.exists(path) else None
+    fd, temp = tempfile.mkstemp(prefix=".gsd-", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8") if isinstance(text, str) else text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temp, mode)
+        else:
+            os.chmod(temp, 0o644)
+        os.replace(temp, path)
+    except BaseException:
+        if os.path.exists(temp):
+            os.unlink(temp)
+        raise
+    return sha256_file(path)
+
+
+class Transaction:
+    """Writes that can be undone. Rollback never overwrites a file changed since gsd wrote it."""
+
+    def __init__(self):
+        self.originals, self.written, self.created = {}, {}, []
+
+    def write(self, path, text, expect=None):
+        existed = os.path.exists(path)
+        if expect is not None and not existed:
+            raise Conflict("%s was removed while gsd was working; nothing was recreated" % path)
+        if existed:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+            if expect is not None and sha256_bytes(raw) != expect:
+                raise Conflict("%s changed while gsd was working; nothing was overwritten" % path)
+            self.originals.setdefault(path, raw)
+        self.written[path] = atomic_write(path, text)
+        if not existed and path not in self.created:
+            self.created.append(path)
+
+    def rollback(self):
+        failures = []
+        for path, raw in self.originals.items():
+            try:
+                if path in self.written and sha256_file(path) != self.written[path]:
+                    failures.append("%s (changed by someone else; left as is)" % path)
+                    continue
+                atomic_write(path, raw)
+            except OSError as error:
+                failures.append("%s (%s)" % (path, error))
+        for path in self.created:
+            try:
+                if os.path.exists(path) and sha256_file(path) == self.written.get(path):
+                    os.unlink(path)
+            except OSError as error:
+                failures.append("%s (%s)" % (path, error))
+        return failures
+
+
+def worktrees(checkout):
+    if not is_git_checkout(checkout):
+        return [checkout]
+    code, out = git(checkout, "worktree", "list", "--porcelain")
+    paths = [line[len("worktree ") :] for line in out.splitlines() if line.startswith("worktree ")] if code == 0 else []
+    return paths or [checkout]
+
+
+def folder_copies(checkout, folder):
+    """Paths of an item folder of this name in the other worktrees of checkout."""
+    found = []
+    for tree in worktrees(checkout):
+        if os.path.realpath(tree) == os.path.realpath(checkout):
+            continue
+        for base in (os.path.join(tree, ".agents", "gsd"), os.path.join(tree, "docs", "gsd")):
+            for candidate in (os.path.join(base, folder), os.path.join(base, "archive", folder)):
+                if os.path.isfile(os.path.join(candidate, "IDEA.md")):
+                    found.append(candidate)
+            if os.path.isdir(base):
+                for year in sorted(os.listdir(base)):
+                    if re.match(r"^\d{4}$", year):
+                        for month in sorted(os.listdir(os.path.join(base, year))):
+                            candidate = os.path.join(base, year, month, folder)
+                            if os.path.isfile(os.path.join(candidate, "IDEA.md")):
+                                found.append(candidate)
+    return found
+
+
+def require_owner(checkout, folder, discovered=()):
+    """Raise Conflict unless checkout owns items named folder (or the repository).
+
+    discovered: paths of copies already found by the scan, such as separate
+    clones, which `git worktree list` cannot see.
+    """
+    identity = repo_identity(checkout)
+    entry = mapped_owner(load_owners(), identity, folder)
+    if entry:
+        owner = entry["checkout"]
+        if not os.path.isdir(owner) or repo_identity(owner) != identity:
+            raise Conflict("owner mapping for %s is stale: %s" % (folder or identity, owner))
+        if os.path.realpath(owner) != os.path.realpath(checkout):
+            raise Conflict("this checkout does not own %s; the owner is %s" % (folder or "this repository", owner))
+        return
+    if folder and (list(discovered) or folder_copies(checkout, folder)):
+        raise Conflict("%s has copies in other checkouts and no owner is mapped; run `gsd owner set`" % folder)
+
+
+def require_item_owner(item):
+    require_owner(item.checkout, item.folder, [c["path"] for c in item.copies])
+
+
+def item_lock_key(item_or_checkout, folder):
+    return "%s|%s" % (repo_identity(item_or_checkout), folder)
+
+
+YAML_PLAIN_RE = re.compile(r"^[A-Za-z0-9_./()@+-][^#:]*$")
+
+
+def yaml_scalar(value):
+    """Encode a scalar so that unquote() returns it unchanged."""
+    value = str(value)
+    if value and YAML_PLAIN_RE.match(value) and not value.endswith(" ") and value not in ("true", "false", "null"):
+        return value
+    if '"' not in value and "\\" not in value and "\n" not in value:
+        return '"%s"' % value
+    return "'%s'" % value.replace("'", "''")
+
+
+def render_field(key, value):
+    if isinstance(value, list):
+        if not value:
+            return ["%s: []" % key]
+        return ["%s:" % key] + ["  - %s" % yaml_scalar(v) for v in value]
+    return ["%s: %s" % (key, yaml_scalar(value))]
+
+
+def edit_front_matter(text, changes):
+    """Change front-matter keys in place. A value of None removes the key."""
+    lines = text.split("\n")
+    if not lines or lines[0].rstrip() != "---":
+        raise Refused("no front matter to edit")
+    end = next((i for i in range(1, len(lines)) if lines[i].rstrip() == "---"), None)
+    if end is None:
+        raise Refused("unterminated front matter")
+    spans = {}
+    i = 1
+    while i < end:
+        match = re.match(r"^([A-Za-z_][\w-]*):(.*)$", lines[i])
+        if not match:
+            i += 1
+            continue
+        key, rest = match.group(1), strip_comment(match.group(2).strip())
+        j = i + 1
+        if rest.startswith("[") and not rest.endswith("]"):
+            while j < end and not lines[j - 1].strip().endswith("]"):
+                j += 1
+            spans[key] = (i, j, [])
+            i = j
+            continue
+        last, comments = i, []
+        while j < end:
+            line = lines[j]
+            if line.lstrip().startswith("#") or not line.strip():
+                j += 1
+                continue
+            if re.match(r"^\s+\S", line) or re.match(r"^-\s", line):
+                last = j
+                j += 1
+                continue
+            break
+        comments = [lines[k] for k in range(i + 1, last + 1) if lines[k].lstrip().startswith("#")]
+        spans[key] = (i, last + 1, comments)
+        i = last + 1
+    head, fm, tail = lines[:1], lines[1:end], lines[end:]
+    additions = []
+    for key, value in reversed(sorted(changes.items(), key=lambda kv: spans.get(kv[0], (10**9,))[0])):
+        if key in spans:
+            start, stop, comments = spans[key]
+            replacement = [] if value is None else render_field(key, value)
+            fm[start - 1 : stop - 1] = replacement + comments
+        elif value is not None:
+            additions = render_field(key, value) + additions
+    result = "\n".join(head + fm + additions + tail)
+    parsed = parse_front_matter(result)[0]
+    original = parse_front_matter(text)[0]
+    for key, value in original.items():
+        if key not in changes and parsed.get(key) != value:
+            raise Refused("editing would change %s, which was not asked for" % key)
+    for key, value in changes.items():
+        expected = value if value is not None else None
+        if parsed.get(key) != expected and not (value is None and key not in parsed):
+            raise Refused("editing %s did not round-trip (wanted %r, got %r)" % (key, value, parsed.get(key)))
+    return result
+
+
+def item_diagnostics_for(item_path, gsd_root, checkout, location, idea_text):
+    probe = Item(item_path, gsd_root, checkout, location)
+    validate_idea(probe, datetime.date.today(), idea_text)
+    validate_location(probe)
+    validate_documents(probe)
+    return {(d["code"], d["message"]) for d in probe.diagnostics if d["severity"] == "error"}
+
+
+def written(command, paths, fmt):
+    if fmt == "json":
+        return (
+            json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "command": command,
+                    "written": [{"path": p, "sha256": sha256_file(p)} for p in paths],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    return "".join("wrote %s (sha256 %s)\n" % (p, sha256_file(p)) for p in paths)
+
+
+def parse_assignments(pairs):
+    changes = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise UsageError("expected KEY=VALUE, got %r" % pair)
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if key not in REQUIRED_FIELDS and key not in OPTIONAL_FIELDS:
+            raise UsageError("unknown field %r" % key)
+        if key == "slug":
+            raise UsageError("slug is the folder identity and cannot be set")
+        if key in LIST_FIELDS:
+            changes[key] = [v.strip() for v in value.split(",") if v.strip()]
+        else:
+            changes[key] = value.strip() if value.strip() else None
+    return changes
+
+
+def apply_idea_changes(item, changes, expect=None):
+    """Edit IDEA.md front matter under the lock; refuse new errors."""
+    path = os.path.join(item.path, "IDEA.md")
+    require_item_owner(item)
+    with Lock(item_lock_key(item.checkout, item.folder)):
+        text, crlf, current = read_doc(path)
+        if expect is not None and current != expect:
+            raise Conflict("%s changed: expected %s, found %s" % (path, expect, current))
+        changes = dict(changes)
+        changes.setdefault("updated", datetime.date.today().isoformat())
+        new_text = edit_front_matter(text, changes)
+        before = item_diagnostics_for(item.path, item.gsd_root, item.checkout, item.location, text)
+        after = item_diagnostics_for(item.path, item.gsd_root, item.checkout, item.location, new_text)
+        added = sorted(after - before)
+        if added:
+            raise Refused("the change would add errors:\n  " + "\n  ".join("%s: %s" % a for a in added))
+        atomic_write(path, encode_doc(new_text, crlf), current)
+    return [path]
+
+
+BRANCH_PREFIXES = ("feature/", "feat/", "fix/", "bugfix/", "hotfix/", "chore/", "docs/", "refactor/")
+BASE_BRANCHES = ("main", "master", "develop", "trunk", "HEAD", "")
+
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def existing_folder_names(gsd_dir):
+    """Item folder names under gsd_dir, including compacted summaries (<slug>.md).
+
+    Folded items leave no file; cmd_new adds them from closed_trailers().
+    """
+    names = set()
+    for current, dirnames, filenames in os.walk(gsd_dir):
+        if "IDEA.md" in filenames:
+            names.add(os.path.basename(current))
+            dirnames[:] = []
+            continue
+        names.update(n[:-3] for n in filenames if n.endswith(".md") and FOLDER_RE.match(n[:-3]))
+    return names
+
+
+def cmd_new(args, checkout):
+    code, branch = git(checkout, "rev-parse", "--abbrev-ref", "HEAD") if is_git_checkout(checkout) else (1, "")
+    branch = branch.strip() if code == 0 else ""
+    if args.slug:
+        name = slugify(args.slug)
+    elif branch not in BASE_BRANCHES:
+        stripped = branch
+        for prefix in BRANCH_PREFIXES:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+                break
+        name = slugify(stripped)
+    else:
+        name = slugify(args.title)
+    if not name:
+        raise UsageError("cannot derive a folder name; pass --slug")
+    today = datetime.date.today().isoformat()
+    require_owner(checkout, None)
+    gsd_dir = os.path.join(checkout, ".agents", "gsd")
+    with Lock(item_lock_key(checkout, "new")):
+        taken = set()
+        for base in (gsd_dir, os.path.join(checkout, "docs", "gsd")):
+            taken |= existing_folder_names(base) if os.path.isdir(base) else set()
+        taken |= set(closed_trailers(checkout))
+        folder, n = "%s-%s" % (today, name), 1
+        while folder in taken or os.path.exists(os.path.join(gsd_dir, folder)):
+            n += 1
+            folder = "%s-%s-v%d" % (today, name, n)
+        target = os.path.join(gsd_dir, folder)
+        os.makedirs(gsd_dir, exist_ok=True)
+        os.mkdir(target)
+        meta = [
+            ("slug", folder),
+            ("title", args.title),
+            ("purpose", args.purpose or "To be defined."),
+            ("type", args.type),
+            ("stage", "ideation"),
+            ("delivery", "proposed"),
+            ("created", today),
+            ("updated", today),
+            ("version", "1"),
+            ("next_action", args.next_action or "Clarify the outcome, scope and completion boundary."),
+            ("responsible", args.responsible),
+            ("branches", [branch] if branch not in BASE_BRANCHES else []),
+            ("parents", []),
+            ("dependencies", []),
+            ("blockers", []),
+        ]
+        lines = ["---"]
+        for key, value in meta:
+            lines += render_field(key, value)
+        lines += [
+            "---",
+            "",
+            "# Idea",
+            "",
+            "## Outcome",
+            "",
+            args.purpose or "To be defined.",
+            "",
+            "## Scope",
+            "",
+            "To be defined.",
+            "",
+            "## Completion boundary",
+            "",
+            "To be defined.",
+            "",
+            "## Lifecycle",
+            "",
+            "- [ ] Ideation",
+            "  - [ ] Light grilling",
+            "  - [ ] Scouting",
+            "  - [ ] CP1 Kickoff",
+            "",
+        ]
+        path = os.path.join(target, "IDEA.md")
+        atomic_write(path, "\n".join(lines))
+    return [path]
+
+
+PLAN_DOCS = ("PLAN.md", "SPEC.md", "TODO.md", "DECISIONS.md")
+PLAN_KEYS = ("next_action", "responsible", "stage")
+
+
+def cmd_plan(args, item):
+    if args.write:
+        if args.write not in PLAN_DOCS:
+            raise UsageError("plan can write only %s" % ", ".join(PLAN_DOCS))
+        text = sys.stdin.read()
+        path = os.path.join(item.path, args.write)
+        require_item_owner(item)
+        with Lock(item_lock_key(item.checkout, item.folder)):
+            atomic_write(path, text, args.expect)
+        return [path]
+    changes = parse_assignments(args.set or [])
+    if not changes:
+        raise UsageError("plan needs --write DOC or --set KEY=VALUE")
+    for key, value in changes.items():
+        if key not in PLAN_KEYS and key != "updated":
+            raise UsageError("plan can set only %s" % ", ".join(PLAN_KEYS))
+        if key == "stage" and value not in ("ideation", "planning"):
+            raise UsageError("plan can set stage only to ideation or planning")
+    return apply_idea_changes(item, changes, args.expect)
+
+
+def cmd_owner(args, checkout):
+    identity = repo_identity(checkout)
+    path = owners_path()
+    if args.action == "show":
+        owners = load_owners()
+        return [e for e in owners if e["repo"] == identity] if not args.every else owners, identity
+    with Lock("owners|" + path):
+        owners = load_owners()
+        slug = args.item or None
+        owners = [e for e in owners if not (e["repo"] == identity and (e.get("slug") or None) == slug)]
+        if args.action == "set":
+            target = os.path.abspath(os.path.expanduser(args.checkout or checkout))
+            if repo_identity(target) != identity:
+                raise Refused("%s is not a checkout of %s" % (target, identity))
+            owners.append({"repo": identity, "slug": slug, "checkout": target})
+        owners.sort(key=lambda e: (e["repo"], e.get("slug") or "", e["checkout"]))
+        atomic_write(path, json.dumps({"schema": SCHEMA, "owners": owners}, indent=2, sort_keys=True) + "\n")
+    return [path], identity
+
+
+# --------------------------------------------------------------------------
+# Phase 3: links, prune and reopen
+
+INLINE_LINK_RE = re.compile(
+    r"(!?\[[^\]\n]*\]\()(<[^>\n]*>|[^)\s]+)((?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^)\n]*\)))?\s*\))"
+)
+REF_LINK_RE = re.compile(r"^(\s{0,3}\[[^\]\n]+\]:\s+)(\S+)(.*)$")
+# A code span opens and closes with backtick runs of exactly the same length.
+CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`)(?:.+?)(?<!`)\1(?!`)", re.DOTALL)
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])\s+")
+
+
+def prose_lines(text):
+    """Yield (offset, line) for lines outside fenced and indented code."""
+    offset, previous_blank, last_block = 0, True, None
+    for _, line, in_fence in markdown_lines(text):
+        length = len(line) + 1
+        indented = line.startswith("    ") or line.startswith("\t")
+        if in_fence:
+            last_block = "code"
+        elif indented and previous_blank and last_block != "list":
+            last_block = "code"
+        elif indented and last_block == "code" and not previous_blank:
+            pass
+        elif line.strip():
+            last_block = "list" if LIST_ITEM_RE.match(line) or (indented and last_block == "list") else "text"
+            yield offset, line
+        previous_blank = not line.strip()
+        offset += length
+
+
+def inline_blocks(text):
+    """Group prose lines into inline containers: a heading, or a paragraph or list
+    item and its continuation lines. Code spans never cross these boundaries."""
+    blocks, current, expected = [], [], None
+    for offset, line in prose_lines(text):
+        starts_new = (
+            offset != expected
+            or HEADING_RE.match(line)
+            or LIST_ITEM_RE.match(line)
+            or (current and HEADING_RE.match(current[-1][1]))
+        )
+        if starts_new and current:
+            blocks.append(current)
+            current = []
+        current.append((offset, line))
+        expected = offset + len(line) + 1
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def link_targets(text):
+    """Yield (start, end, target) for link targets outside code (fences, indents, spans)."""
+    for block in inline_blocks(text):
+        joined = "\n".join(line for _, line in block)
+        masked = CODE_SPAN_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), joined) if "`" in joined else joined
+        position = 0
+        for offset, line in block:
+            masked_line = masked[position : position + len(line)]
+            position += len(line) + 1
+            for match in INLINE_LINK_RE.finditer(masked_line):
+                yield offset + match.start(2), offset + match.end(2), line[match.start(2) : match.end(2)]
+            ref = REF_LINK_RE.match(masked_line)
+            if ref:
+                yield offset + ref.start(2), offset + ref.end(2), line[ref.start(2) : ref.end(2)]
+
+
+def relative_target(target):
+    raw = target[1:-1] if target.startswith("<") and target.endswith(">") else target
+    if not raw or raw.startswith("#") or raw.startswith("/") or re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.I):
+        return None
+    path, _, anchor = raw.partition("#")
+    return path, anchor
+
+
+def markdown_files(checkout, skip=None):
+    for current, dirnames, filenames in os.walk(checkout):
+        dirnames[:] = sorted(d for d in dirnames if d not in PRUNED_DIRS and os.path.join(current, d) != skip)
+        for name in sorted(filenames):
+            if name.endswith(".md"):
+                yield os.path.join(current, name)
+
+
+def broken_links(checkout, skip=None):
+    """Return {(file, absolute target)} for relative links that do not resolve."""
+    broken = set()
+    for path in markdown_files(checkout, skip):
+        try:
+            text = read_doc(path)[0]
+        except (OSError, UnicodeDecodeError):
+            continue
+        for _, _, target in link_targets(text):
+            parsed = relative_target(target)
+            if parsed and parsed[0]:
+                resolved = os.path.normpath(os.path.join(os.path.dirname(path), parsed[0]))
+                if not os.path.exists(resolved):
+                    broken.add((path, resolved))
+    return broken
+
+
+def plan_move(checkout, old, new, collapse=False):
+    """Return (rewrites, moved): rewrites {file_before: (new_bytes_text, digest_before)}.
+
+    collapse: old is removed and every link into it points at the file new
+    instead (compaction); files inside old are not rewritten.
+    """
+
+    def moved(path):
+        if path == old or path.startswith(old + os.sep):
+            return new if collapse else new + path[len(old) :]
+        return path
+
+    rewrites = {}
+    today = datetime.date.today().isoformat()
+    for path in markdown_files(checkout):
+        try:
+            text, crlf, digest = read_doc(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        file_after = moved(path)
+        if collapse and file_after != path:
+            continue
+        pieces, last, changed = [], 0, False
+        for start, end, target in link_targets(text):
+            parsed = relative_target(target)
+            if parsed is None or not parsed[0]:
+                continue
+            link_path, anchor = parsed
+            target_before = os.path.normpath(os.path.join(os.path.dirname(path), link_path))
+            target_after = moved(target_before)
+            if file_after == path and target_after == target_before:
+                continue
+            new_rel = os.path.relpath(target_after, os.path.dirname(file_after))
+            summary = collapse and target_after == new
+            if link_path.endswith("/") and not new_rel.endswith("/") and not summary:
+                new_rel += "/"
+            if os.path.normpath(new_rel) == os.path.normpath(link_path):
+                continue
+            replacement = new_rel + ("#" + anchor if anchor and not summary else "")
+            if target.startswith("<"):
+                replacement = "<%s>" % replacement
+            pieces.append(text[last:start] + replacement)
+            last, changed = end, True
+        if changed:
+            pieces.append(text[last:])
+            new_text = "".join(pieces)
+            if gsd_root_of(os.path.dirname(file_after)) and updated_value(new_text):
+                new_text = with_updated(new_text, today)
+            rewrites[path] = (encode_doc(new_text, crlf), digest)
+    return rewrites, moved
+
+
+def owning_item_key(checkout, path):
+    """Lock key of the GSD item containing path, or None."""
+    root = gsd_root_of(os.path.dirname(path))
+    if not root:
+        return None
+    probe = os.path.dirname(path)
+    while probe.startswith(root + os.sep):
+        if os.path.isfile(os.path.join(probe, "IDEA.md")):
+            return item_lock_key(checkout, os.path.basename(probe))
+        probe = os.path.dirname(probe)
+    return None
+
+
+def move_item(checkout, old, new, dry, extra=None, held=(), collapse=False):
+    """Move an item folder, rebasing links; undo everything if a link breaks.
+
+    collapse: remove the folder instead and point its inbound links at the
+    existing summary file new (compaction).
+
+    extra: optional function(new_folder, write) run after the move and before
+    verification (used by reopen); its writes are undone with the move.
+    held: lock keys the caller already holds. Items whose documents are
+    rewritten are locked too, and every rewritten file must still match the
+    digest read when the move was planned.
+    """
+    rewrites, moved = plan_move(checkout, old, new, collapse)
+    if dry:
+        return {"from": old, "to": new, "rewrites": sorted(rewrites)}
+    keys = sorted(
+        {
+            k
+            for k in (owning_item_key(checkout, p) for p in rewrites if not p.startswith(old + os.sep))
+            if k and k not in held
+        }
+    )
+    import contextlib
+
+    with contextlib.ExitStack() as stack:
+        for key in keys:
+            stack.enter_context(Lock(key))
+        before = {
+            (moved(f), moved(t))
+            for f, t in broken_links(checkout)
+            if not (collapse and (f == old or f.startswith(old + os.sep)))
+        }
+        tx = Transaction()
+        # A compacted folder is parked beside itself until the links check out, so it can be put back.
+        parked = os.path.join(os.path.dirname(old), PARKED_PREFIX + os.path.basename(old)) if collapse else None
+        if parked:
+            os.rename(old, parked)
+        else:
+            os.makedirs(os.path.dirname(new), exist_ok=True)
+            os.rename(old, new)
+        try:
+            for path, (text, digest) in sorted(rewrites.items()):
+                tx.write(moved(path), text, digest)
+            if extra:
+                extra(new, tx.write)
+            broken = sorted(broken_links(checkout, parked) - before)
+            if broken:
+                raise Conflict("links would break: " + "; ".join("%s -> %s" % b for b in broken[:5]))
+        except BaseException:
+            failures = tx.rollback()
+            moved_to = parked or new
+            if os.path.exists(moved_to) and not os.path.exists(old):
+                os.rename(moved_to, old)
+            if failures:
+                raise Conflict("move failed and was only partly undone: " + "; ".join(failures))
+            raise
+    if parked:
+        try:
+            shutil.rmtree(parked)
+        except OSError as error:
+            raise Conflict(
+                "removed, but %s could not be fully deleted (%s); its content is in the record commit, "
+                "so delete what is left by hand" % (parked, error)
+            )
+    return {"from": old, "to": new, "rewrites": sorted(moved(p) for p in rewrites)}
+
+
+def dirty(checkout, path, ignored=False):
+    if not is_git_checkout(checkout):
+        return False
+    extra = ["--ignored=matching"] if ignored else []
+    code, out = git(checkout, "status", "--porcelain", "--untracked-files=all", *extra, "--", path)
+    return code != 0 or bool(out.strip())
+
+
+def prune_destination(item):
+    """docs/gsd/YYYY/MM/<folder> by completed or cancelled date, or None if the item is not closed."""
+    meta = item.meta
+    if meta.get("stage") == "complete" and meta.get("delivery") == "verified" and valid_date(meta.get("completed")):
+        date = meta["completed"]
+    elif meta.get("delivery") == "cancelled" and valid_date(meta.get("cancelled")):
+        date = meta["cancelled"]
+    else:
+        return None
+    return os.path.join(closed_root(item), date[:4], date[5:7], item.folder)
+
+
+def owner_problem(item):
+    try:
+        require_item_owner(item)
+    except Conflict as error:
+        return str(error)
+    return None
+
+
+def cmd_prune(items, refs, dry):
+    movable = ("active", "legacy")
+    chosen = select(items, refs) if refs else [i for i in items if i.location in movable]
+    # Check every item before moving any: a move rebases links in the others,
+    # which would otherwise make them look uncommitted.
+    planned = []
+    for item in chosen:
+        entry = {"slug": item.slug, "path": item.path}
+        destination = prune_destination(item) if item.location in movable else None
+        reason = None
+        if item.location not in movable:
+            reason = "not in an active or old archive location"
+        elif destination is None:
+            reason = "not complete/verified with a completed date, nor cancelled with a cancelled date"
+        elif item.errors():
+            reason = "has %d error diagnostic(s)" % item.errors()
+        elif dirty(item.checkout, item.path):
+            reason = "has uncommitted or untracked changes"
+        elif os.path.exists(destination):
+            reason = "destination exists: %s" % destination
+        else:
+            reason = owner_problem(item)
+        if reason:
+            if refs or destination is not None:
+                entry["skipped"] = reason
+                planned.append((entry, None, None))
+            continue
+        planned.append((entry, item, destination))
+    results = []
+    for entry, item, destination in planned:
+        if item is not None:
+            key = item_lock_key(item.checkout, item.folder)
+            with Lock(key):
+                entry.update(move_item(item.checkout, item.path, destination, dry, held={key}))
+            entry["trailer"] = closed_trailer(item.folder, "archive", item.meta.get("delivery"))
+        results.append(entry)
+    return results
+
+
+def check_summary(item, summary):
+    """Refuse unless the summary names this item and its record commit holds the folder as it is now."""
+    if not os.path.isfile(summary):
+        raise Refused("write the summary first: %s (templates/SUMMARY.md)" % summary)
+    text = read_doc(summary)[0]
+    for _, _, target in link_targets(text):
+        parsed = relative_target(target)
+        if parsed and parsed[0]:
+            resolved = os.path.normpath(os.path.join(os.path.dirname(summary), parsed[0]))
+            if resolved == item.path or resolved.startswith(item.path + os.sep):
+                raise Refused(
+                    "%s links into the folder compaction removes (%s); link the record commit instead"
+                    % (summary, parsed[0])
+                )
+    meta = parse_front_matter(text)[0]
+    if meta.get("slug") != item.folder:
+        raise Refused("%s: slug is %r, expected %r" % (summary, meta.get("slug"), item.folder))
+    check_record(item, meta.get("record"), summary)
+    return meta.get("record")
+
+
+def check_record(item, record, source):
+    """Refuse unless record is the full SHA of a commit holding the item folder exactly as it is now."""
+    if not isinstance(record, str) or not FULL_SHA_RE.match(record):
+        raise Refused("%s: record must be the full SHA of the commit that holds the item folder" % source)
+    if not is_git_checkout(item.checkout):
+        raise Refused("removing the folder needs Git history to keep the full record")
+    code, _ = git(item.checkout, "rev-parse", "--verify", "--quiet", record + "^{commit}")
+    if code != 0:
+        raise Refused("%s: record %s is not a commit" % (source, record))
+    rel = os.path.relpath(item.path, item.checkout)
+    code, _ = git(item.checkout, "diff", "--quiet", record, "--", rel)
+    if code != 0:
+        raise Refused("record %s does not hold %s as it is now; commit the close-out first" % (record, rel))
+
+
+def cmd_compact(item, dry):
+    destination = prune_destination(item)
+    if destination is None:
+        raise Refused(
+            "%s is not complete/verified with a completed date, nor cancelled with a cancelled date" % item.slug
+        )
+    if item.errors():
+        raise Refused("%s has %d error diagnostic(s)" % (item.slug, item.errors()))
+    problem = owner_problem(item)
+    if problem:
+        raise Conflict(problem)
+    summary = destination + ".md"
+    key = item_lock_key(item.checkout, item.folder)
+    with Lock(key):
+        # Checked under the lock so no other gsd write can slip in before the folder is removed.
+        if dirty(item.checkout, item.path, ignored=True):
+            raise Conflict("%s has uncommitted, untracked or ignored files; compaction would lose them" % item.path)
+        record = check_summary(item, summary)
+        # Recovery from an interrupted compaction restores rewritten files from Git, so they must be clean.
+        rewrites, _ = plan_move(item.checkout, item.path, summary, collapse=True)
+        unclean = sorted(p for p in rewrites if dirty(item.checkout, p, ignored=True))
+        if unclean:
+            raise Conflict(
+                "commit or stash the changes in the files whose links compaction rewrites: "
+                + ", ".join(os.path.relpath(p, item.checkout) for p in unclean)
+            )
+        result = move_item(item.checkout, item.path, summary, dry, held={key}, collapse=True)
+    result["compacted"] = True
+    result["trailer"] = closed_trailer(item.folder, "compact", item.meta.get("delivery"), record)
+    return result
+
+
+def links_into(item):
+    """[(file, link)] for links outside the item folder that resolve inside it.
+
+    Absolute targets count too, read both as a filesystem path and from the
+    repository root, because hosts such as GitHub resolve /path from the root.
+    """
+
+    def inside(resolved):
+        return resolved == item.path or resolved.startswith(item.path + os.sep)
+
+    found = []
+    for path in markdown_files(item.checkout, skip=item.path):
+        try:
+            text = read_doc(path)[0]
+        except (OSError, UnicodeDecodeError):
+            continue
+        for _, _, target in link_targets(text):
+            raw = target[1:-1] if target.startswith("<") and target.endswith(">") else target
+            link = raw.partition("#")[0]
+            if link.startswith("/"):
+                candidates = [os.path.normpath(link), os.path.normpath(os.path.join(item.checkout, link.lstrip("/")))]
+            else:
+                parsed = relative_target(target)
+                candidates = (
+                    [os.path.normpath(os.path.join(os.path.dirname(path), parsed[0]))] if parsed and parsed[0] else []
+                )
+            if any(inside(c) for c in candidates):
+                found.append((path, link))
+    return found
+
+
+def cmd_fold(item, record, dry):
+    """Remove a closed item's folder and leave nothing in docs/gsd; Git keeps the full record."""
+    destination = prune_destination(item)
+    if destination is None:
+        raise Refused(
+            "%s is not complete/verified with a completed date, nor cancelled with a cancelled date" % item.slug
+        )
+    if item.errors():
+        raise Refused("%s has %d error diagnostic(s)" % (item.slug, item.errors()))
+    problem = owner_problem(item)
+    if problem:
+        raise Conflict(problem)
+    for leftover in (destination, destination + ".md"):
+        if os.path.exists(leftover):
+            raise Refused(
+                "Fold leaves nothing in docs/gsd, but %s exists; remove it or use `gsd compact`"
+                % os.path.relpath(leftover, item.checkout)
+            )
+    key = item_lock_key(item.checkout, item.folder)
+    with Lock(key):
+        if dirty(item.checkout, item.path, ignored=True):
+            raise Conflict("%s has uncommitted, untracked or ignored files; folding would lose them" % item.path)
+        check_record(item, record, "--record")
+        inbound = links_into(item)
+        if inbound:
+            raise Refused(
+                "point these links at the maintained docs before folding: "
+                + "; ".join("%s -> %s" % (os.path.relpath(f, item.checkout), t) for f, t in inbound[:5])
+                + ("; and %d more" % (len(inbound) - 5) if len(inbound) > 5 else "")
+            )
+        # No link points into the folder, so the compaction machinery only parks, checks and removes it.
+        result = move_item(item.checkout, item.path, item.path, dry, held={key}, collapse=True)
+    result.update(
+        {"to": None, "folded": True, "trailer": closed_trailer(item.folder, "fold", item.meta.get("delivery"), record)}
+    )
+    return result
+
+
+def superseded_final(text, today):
+    lines = text.split("\n")
+    notice = (
+        "Superseded close-out: the conclusion below was superseded when the item was reopened on %s (DECISIONS.md)."
+        % today
+    )
+    start = 0
+    if lines and lines[0].rstrip() == "---":
+        start = next((i for i in range(1, len(lines)) if lines[i].rstrip() == "---"), 0) + 1
+    for i in range(start, len(lines)):
+        if lines[i].startswith("## "):
+            return "\n".join(lines[:i] + [notice, ""] + lines[i:])
+    return "\n".join(lines + ["", notice, ""])
+
+
+def with_updated(text, today):
+    try:
+        return edit_front_matter(text, {"updated": today})
+    except Refused:
+        return text
+
+
+def cmd_reopen(item, args):
+    if item.location == "active" and not item.terminal():
+        raise Refused("%s is not complete or cancelled" % item.slug)
+    meta = item.meta
+    today = datetime.date.today().isoformat()
+    was_complete = meta.get("stage") == "complete"
+    terminal_key = "completed" if meta.get("completed") else "cancelled"
+    terminal_date = meta.get(terminal_key, "")
+    stage = args.stage or ("review" if was_complete else meta.get("stage"))
+    delivery = args.delivery or ("implemented" if was_complete else "in_progress")
+    version = meta.get("version")
+    changes = {
+        "completed": None,
+        "cancelled": None,
+        "stage": stage,
+        "delivery": delivery,
+        "updated": today,
+        "version": str(int(version) + 1) if isinstance(version, str) and VERSION_RE.match(version) else "1",
+        "next_action": "Reopened on %s: reassess affected approvals and evidence (DECISIONS.md), then continue."
+        % today,
+    }
+    target = os.path.join(active_root(item), item.folder)
+    if item.location != "active" and os.path.exists(target):
+        raise Conflict("an active folder already exists: %s" % target)
+    if dirty(item.checkout, item.path):
+        raise Conflict("%s has uncommitted or untracked changes" % item.path)
+    problem = owner_problem(item)
+    if problem:
+        raise Conflict(problem)
+
+    def update_records(folder, write):
+        idea = os.path.join(folder, "IDEA.md")
+        text, crlf, digest = read_doc(idea)
+        text = edit_front_matter(text, changes)
+        if item.tier:
+            text = reopen_lifecycle(text, stage)
+        write(idea, encode_doc(text, crlf), digest)
+        final = os.path.join(folder, "FINAL.md")
+        if os.path.isfile(final):
+            text, crlf, digest = read_doc(final)
+            write(final, encode_doc(with_updated(superseded_final(text, today), today), crlf), digest)
+        decisions = os.path.join(folder, "DECISIONS.md")
+        bullet = (
+            "- %s Reopened with `gsd reopen`: prior state %s/%s, %s %s. Reason: %s. Approvals covering "
+            "the reopened scope need reassessment.\n"
+            % (today, meta.get("stage"), meta.get("delivery"), terminal_key, terminal_date, args.reason or "not given")
+        )
+        if os.path.isfile(decisions):
+            text, crlf, digest = read_doc(decisions)
+            write(decisions, encode_doc(with_updated(text, today).rstrip("\n") + "\n" + bullet, crlf), digest)
+        else:
+            write(decisions, "---\nupdated: %s\nversion: 1\n---\n\n# Decisions\n\n%s" % (today, bullet))
+
+    key = item_lock_key(item.checkout, item.folder)
+    with Lock(key):
+        if args.dry:
+            plan = (
+                move_item(item.checkout, item.path, target, True)
+                if item.location != "active"
+                else {"from": item.path, "to": item.path, "rewrites": []}
+            )
+            plan["changes"] = changes
+            if item.tier:
+                plan["lifecycle_unticked"] = [e["label"] for e in lifecycle_reopen_entries(item.idea or "", stage)]
+            return plan
+        if item.location != "active":
+            result = move_item(item.checkout, item.path, target, False, extra=update_records, held={key})
+        else:
+            tx = Transaction()
+            try:
+                update_records(item.path, tx.write)
+            except BaseException:
+                failures = tx.rollback()
+                if failures:
+                    raise Conflict("reopen failed and was only partly undone: " + "; ".join(failures))
+                raise
+            result = {"from": item.path, "to": item.path, "rewrites": []}
+    return result
+
+
+# --------------------------------------------------------------------------
+# Phase 3: comments, approvals and freshness
+
+COMMENT_MARKER_RE = re.compile(r"^<!-- gsd:comment (C-\d+) -->\s*$")
+RESOLUTION_RE = re.compile(r"\bResolution (C-\d+):")
+
+
+def item_comments(item_path):
+    """Return comments [{file, line, id, status, text}] across the item's documents."""
+    comments, resolved, used = [], set(), set()
+    texts = {}
+    for name in item_documents(item_path):
+        try:
+            with open(os.path.join(item_path, name), encoding="utf-8") as handle:
+                texts[name] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    for name, text in texts.items():
+        resolved.update(RESOLUTION_RE.findall(text))
+        previous, group = None, None
+        for number, line, in_code in markdown_lines(text):
+            if not in_code and line.startswith(">>"):
+                if group is None:
+                    marker = COMMENT_MARKER_RE.match(previous or "")
+                    group = {
+                        "file": os.path.join(item_path, name),
+                        "line": number,
+                        "id": marker.group(1) if marker else None,
+                        "text": [],
+                    }
+                    comments.append(group)
+                    if marker:
+                        used.add(marker.group(1))
+                group["text"].append(line)
+            else:
+                group = None
+            marker = COMMENT_MARKER_RE.match(line)
+            if marker:
+                used.add(marker.group(1))
+            previous = line
+    for comment in comments:
+        comment["text"] = "\n".join(comment["text"])
+        comment["status"] = (
+            "unassigned" if comment["id"] is None else ("resolved" if comment["id"] in resolved else "open")
+        )
+    return comments, used
+
+
+def validate_comments(item):
+    comments, _ = item_comments(item.path)
+    item.comments = comments
+    for c in comments:
+        if c["status"] != "resolved":
+            label = c["id"] or "unassigned comment"
+            item.diagnostics.append(
+                diag(
+                    "comment-unresolved",
+                    "warning",
+                    c["file"],
+                    "%s is %s: %s" % (label, c["status"], c["text"].splitlines()[0][:60]),
+                    c["line"],
+                )
+            )
+
+
+def cmd_comments_assign(item):
+    require_item_owner(item)
+    paths = []
+    with Lock(item_lock_key(item.checkout, item.folder)):
+        comments, used = item_comments(item.path)
+        numbers = [int(u[2:]) for u in used] or [0]
+        next_id = max(numbers) + 1
+        by_file = {}
+        for c in comments:
+            if c["id"] is None:
+                by_file.setdefault(c["file"], []).append(c)
+        for path, pending in sorted(by_file.items()):
+            text, crlf, digest = read_doc(path)
+            lines = text.split("\n")
+            for c in sorted(pending, key=lambda c: c["line"]):
+                c["id"] = "C-%02d" % next_id
+                next_id += 1
+            for c in sorted(pending, key=lambda c: c["line"], reverse=True):
+                lines.insert(c["line"] - 1, "<!-- gsd:comment %s -->" % c["id"])
+            atomic_write(path, encode_doc("\n".join(lines), crlf), digest)
+            paths.append(path)
+    return paths
+
+
+APPROVAL_RE = re.compile(r"\bapprov(?:ed|es)\b", re.IGNORECASE)
+NOT_APPROVAL_RE = re.compile(
+    r"\bpending\b|\bnot(?:\s+\w+){0,2}\s+approved\b|\bunapproved\b|\bwithdr(?:aw|ew|awn)\b", re.IGNORECASE
+)
+FOR_PLANNING_RE = re.compile(r"\bfor planning\b", re.IGNORECASE)
+REVIEW_STEP_RE = re.compile(r"^pre-implementation review\b", re.IGNORECASE)
+DOC_VERSIONS_RE = re.compile(r"\b(IDEA|PLAN|SPEC|TODO)\.md((?:\s*(?:,|and|or|to)?\s*v\d+\b)+)")
+APPROVAL_NEEDS = {
+    None: {"planning": ("PLAN.md",), "execution": ("SPEC.md", "TODO.md"), "review": ("SPEC.md", "TODO.md")},
+    "L1": {"ideation": ("IDEA.md",), "planning": ("IDEA.md",), "execution": ("IDEA.md",), "review": ("IDEA.md",)},
+    "L2": {
+        "ideation": ("IDEA.md",),
+        "planning": ("PLAN.md", "TODO.md"),
+        "execution": ("PLAN.md", "TODO.md"),
+        "review": ("PLAN.md", "TODO.md"),
+    },
+    "L3": {
+        "ideation": ("IDEA.md",),
+        "planning": ("PLAN.md", "SPEC.md", "TODO.md"),
+        "execution": ("PLAN.md", "SPEC.md", "TODO.md"),
+        "review": ("PLAN.md", "SPEC.md", "TODO.md"),
+    },
+}
+
+
+def decision_bullets(text):
+    bullets, current = [], None
+    for _, line, in_code in markdown_lines(text):
+        if in_code:
+            continue
+        if re.match(r"^[-*]\s", line):
+            current = [line[2:]]
+            bullets.append(current)
+        elif current is not None and line.strip() and line[:1].isspace():
+            current.append(line.strip())
+        else:
+            current = None
+    return [" ".join(b).replace("**", "") for b in bullets]
+
+
+def approvals_of(item):
+    # An IDEA approval "for planning" passes only the ideation gate; later stages need an implementation approval.
+    approved, for_planning = {}, {}
+    decisions = item.docs.get("DECISIONS.md")
+    if decisions:
+        for bullet in decision_bullets(decisions):
+            if not APPROVAL_RE.search(bullet) or NOT_APPROVAL_RE.search(bullet):
+                continue
+            target = for_planning if FOR_PLANNING_RE.search(bullet) else approved
+            for doc, versions in DOC_VERSIONS_RE.findall(bullet):
+                for v in re.findall(r"v(\d+)", versions):
+                    key = doc + ".md"
+                    target[key] = max(target.get(key, 0), int(v))
+    result, awaiting = {}, []
+    needs = APPROVAL_NEEDS[item.tier]
+    names = (("IDEA.md",) if item.tier else ()) + ("PLAN.md", "SPEC.md", "TODO.md")
+    for name in names:
+        if name == "IDEA.md":
+            meta = item.meta
+        else:
+            text = item.docs.get(name)
+            if text is None:
+                continue
+            meta = parse_front_matter(text)[0]
+        current = (
+            int(meta["version"]) if isinstance(meta.get("version"), str) and VERSION_RE.match(meta["version"]) else None
+        )
+        result[name] = {"current": current, "approved": approved.get(name)}
+        if name == "IDEA.md":
+            result[name]["approved_for_planning"] = for_planning.get(name)
+        stage = item.meta.get("stage")
+        have = approved.get(name) or 0
+        if stage == "ideation":
+            have = max(have, for_planning.get(name) or 0)
+        if isinstance(stage, str) and name in needs.get(stage, ()) and current and have < current:
+            awaiting.append("%s v%d" % (name, current))
+    # While the pre-implementation review is the next step, the agent acts first, not the user.
+    if item.meta.get("stage") == "planning" and REVIEW_STEP_RE.match(lifecycle_next(item) or ""):
+        awaiting = []
+    item.approvals = result
+    item.awaiting = awaiting
+
+
+HEX_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+BACKTICK_RE = re.compile(r"`([^`\s]+)`")
+
+
+def evidence_freshness(item):
+    counts = {"current": 0, "stale": 0, "unknown": 0}
+    facts = item.docs.get("FACTS.md")
+    if facts is None:
+        item.counts["freshness"] = counts
+        return
+    path = os.path.join(item.path, "FACTS.md")
+    for rid, number, lines in record_sections(facts, "E"):
+        found = labels_in(lines)
+        result = found.get("result")
+        if not result or first_word(result[0]) != "passed":
+            continue
+        revision = next((found[n][0] for n in EVIDENCE_LABELS["revision"] if n in found), "")
+        state = freshness_of(item, revision)
+        counts[state] += 1
+        if state == "stale":
+            item.diagnostics.append(
+                diag("evidence-stale", "warning", path, "%s passed on a subject that has since changed" % rid, number)
+            )
+    item.counts["freshness"] = counts
+
+
+def freshness_of(item, revision):
+    """Return current|stale|unknown for one evidence record: its commits against
+    the backticked subject paths. Anything else - uncommitted work, no paths -
+    is unknown and needs a rerun before it is relied on."""
+    if not is_git_checkout(item.checkout):
+        return "unknown"
+    commits = [h for h in HEX_RE.findall(revision) if git(item.checkout, "cat-file", "-e", h + "^{commit}")[0] == 0]
+    rels = []
+    for token in BACKTICK_RE.findall(revision):
+        for base in (item.path, item.checkout):
+            candidate = os.path.normpath(os.path.join(base, token))
+            if os.path.exists(candidate):
+                rels.append(os.path.relpath(candidate, item.checkout))
+                break
+    if not commits or not rels:
+        return "unknown"
+    code, out = git(item.checkout, "status", "--porcelain", "--untracked-files=all", "--", *rels)
+    if code != 0:
+        return "unknown"
+    if any(line.startswith("??") for line in out.splitlines()):
+        return "stale"
+    for commit in commits:
+        for rel in rels:
+            if git(item.checkout, "cat-file", "-e", "%s:%s" % (commit, rel))[0] != 0:
+                return "stale"
+        code, _ = git(item.checkout, "diff", "--quiet", commit, "--", *rels)
+        if code == 1:
+            return "stale"
+        if code != 0:
+            return "unknown"
+    return "current"
+
+
+def updated_value(text):
+    if text is None:
+        return None
+    return parse_front_matter(text)[0].get("updated")
+
+
+def stale_dates(item, today):
+    if item.location != "active" or not is_git_checkout(item.checkout):
+        return
+    for name in item_documents(item.path):
+        path = os.path.join(item.path, name)
+        rel = os.path.relpath(path, item.checkout)
+        code, out = git(item.checkout, "log", "-1", "--format=%H %cs", "--", rel)
+        if code != 0 or not out.strip():
+            continue
+        commit, date = out.split()
+        code_now, now_text = git(item.checkout, "show", "%s:%s" % (commit, rel))
+        code_before, before_text = git(item.checkout, "show", "%s^:%s" % (commit, rel))
+        committed = updated_value(now_text if code_now == 0 else None)
+        previous = updated_value(before_text if code_before == 0 else None)
+        stale = False
+        if code_before == 0 and committed and committed == previous and date > committed:
+            stale = True
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            working = handle.read()
+        if (
+            code_now == 0
+            and working != now_text
+            and updated_value(working) == committed
+            and committed
+            and today.isoformat() > committed
+        ):
+            stale = True
+        if stale:
+            item.diagnostics.append(
+                diag(
+                    "stale-updated",
+                    "warning",
+                    path,
+                    "%s changed after its updated date %s" % (name, updated_value(working)),
+                    1,
+                )
+            )
+
+
+# --------------------------------------------------------------------------
+# Stage agents
+
+
+AGENT_STAGES = ("idea", "plan", "build", "review", "complete")
+AGENT_MODES = ("new", "replace", "append")
+AGENT_LAYERS = ("skill", "user", "repo")
+APPEND_STEM_RE = re.compile(r"^(.+)_([1-9]\d*)$")
+
+
+def skill_agents_dir():
+    return os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "references"))
+
+
+def agent_layer_dirs(root, stage):
+    user = os.path.join(os.path.expanduser("~"), ".agents", "rules", stage)
+    repo = os.path.join(root, ".agents", "rules", stage)
+    dirs = [("skill", os.path.join(skill_agents_dir(), stage)), ("user", user)]
+    # Run from the home directory, the repo layer is the user layer; reading it twice would append twice.
+    if os.path.realpath(repo) != os.path.realpath(user):
+        dirs.append(("repo", repo))
+    return dirs
+
+
+def parse_definition(path):
+    """Return (meta, body) for a stage-agent file, or None when it has no `mode`."""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        meta, _, _, found, body = parse_front_matter(handle.read())
+    if not found or "mode" not in meta:
+        return None
+    return meta, "\n".join(body).strip("\n")
+
+
+def resolve_agents(layers, stage):
+    """Resolve one stage from [(layer, dir)] in ascending precedence.
+
+    Returns (agents, diagnostics, skipped). Each bad file is reported and
+    ignored on its own, so every other agent still resolves.
+    """
+    diagnostics, skipped, bases, appends = [], [], {}, []
+    for rank, (layer, folder) in enumerate(layers):
+        if not os.path.isdir(folder):
+            continue
+        for entry in sorted(os.listdir(folder)):
+            path = os.path.join(folder, entry)
+            if not entry.endswith(".md") or not os.path.isfile(path):
+                continue
+            parsed = parse_definition(path)
+            if parsed is None:
+                skipped.append({"stage": stage, "layer": layer, "path": path})
+                continue
+            meta, body = parsed
+            stem, mode = entry[:-3], meta.get("mode")
+            numbered = APPEND_STEM_RE.match(stem)
+
+            def bad(code, message):
+                diagnostics.append(diag(code, "error", path, message))
+
+            if mode not in AGENT_MODES:
+                bad("agent-mode", "unknown mode %r (expected new, replace or append)" % mode)
+            elif mode == "append":
+                if not numbered:
+                    bad("agent-append-name", "an append file must be named NAME_N.md")
+                    continue
+                name, number = numbered.group(1), int(numbered.group(2))
+                if meta.get("name") != name:
+                    bad("agent-name", "name %r does not match %r" % (meta.get("name"), name))
+                elif meta.get("extends") != name:
+                    bad("agent-extends", "extends %r does not match %r" % (meta.get("extends"), name))
+                else:
+                    appends.append((name, number, rank, layer, path, body))
+            elif numbered:
+                bad("agent-append-mode", "%s.md looks like an append and needs mode: append" % stem)
+            elif meta.get("name") != stem:
+                bad("agent-name", "name %r does not match %r" % (meta.get("name"), stem))
+            else:
+                if mode == "replace" and stem not in bases:
+                    diagnostics.append(
+                        diag(
+                            "agent-replace-nothing",
+                            "warning",
+                            path,
+                            "replace with no lower definition of %r; acting as new" % stem,
+                        )
+                    )
+                bases[stem] = {
+                    "layer": layer,
+                    "path": path,
+                    "mode": mode,
+                    "body": body,
+                    "description": meta.get("description", ""),
+                }
+    agents = {}
+    for name, base in sorted(bases.items()):
+        agents[name] = {
+            "stage": stage,
+            "name": name,
+            "description": base["description"],
+            "sources": [{"layer": base["layer"], "path": base["path"], "mode": base["mode"]}],
+            "parts": [base["body"]],
+        }
+    for name, _, _, layer, path, body in sorted(appends, key=lambda a: (a[0], a[1], a[2])):
+        if name not in agents:
+            diagnostics.append(diag("agent-append-base", "error", path, "no base agent %r to append to" % name))
+            continue
+        agents[name]["sources"].append({"layer": layer, "path": path, "mode": "append"})
+        agents[name]["parts"].append(body)
+    result = []
+    for agent in agents.values():
+        parts = agent.pop("parts")
+        agent["body"] = "\n\n".join(p for p in parts if p)
+        result.append(agent)
+    return result, diagnostics, skipped
+
+
+def source_label(source, root):
+    if source["layer"] == "skill":
+        return "skill"
+    path = source["path"]
+    if source["layer"] == "user":
+        home = os.path.expanduser("~")
+        shown = "~" + path[len(home) :] if path.startswith(home + os.sep) else path
+    else:
+        shown = os.path.relpath(path, root)
+    return "%s:%s (%s)" % (source["layer"], shown, source["mode"])
+
+
+def rules_file_role(root, skipped):
+    """Name the role of the repo's review/REVIEW.md: project review rules, or a legacy stage agent or lens.
+
+    The resolver already keeps a file with `mode` as a stage agent and skips one without; this labels the
+    skipped entry and reports a collision, so the legacy use is never also read as project review rules.
+    """
+    path = os.path.join(root, RULES_REL)
+    text, index_text = read_rules(root, None)
+    if text is None:
+        return []
+    meta, _, _, found, _ = parse_front_matter(text)
+    uses = legacy_uses(meta if found else {}, index_text)
+    for entry in skipped:
+        if entry["layer"] == "repo" and os.path.realpath(entry["path"]) == os.path.realpath(path):
+            entry["role"] = "repo lens" if uses else "project review rules"
+    return [diag("rules-collision", "warning", path, collision_message("", uses))] if uses else []
+
+
+def cmd_agents(args, root):
+    if args.all == bool(args.stage):
+        raise UsageError("agents needs a STAGE or --all")
+    if args.stage and args.stage not in AGENT_STAGES:
+        raise UsageError("unknown stage %r (expected %s)" % (args.stage, ", ".join(AGENT_STAGES)))
+    if args.body and not args.name:
+        raise UsageError("--body needs STAGE and NAME")
+    if args.name and not args.body:
+        raise UsageError("NAME is only used with --body")
+    agents, diagnostics, skipped = [], [], []
+    for stage in AGENT_STAGES if args.all else (args.stage,):
+        found, problems, ignored = resolve_agents(agent_layer_dirs(root, stage), stage)
+        agents += found
+        diagnostics += problems
+        skipped += ignored
+        if stage == "review":
+            diagnostics += rules_file_role(root, ignored)
+    if args.body:
+        match = [a for a in agents if a["name"] == args.name]
+        if not match:
+            raise UsageError("no %s agent named %r" % (args.stage, args.name))
+        text = match[0]["body"] + "\n"
+    elif args.format == "json":
+        text = (
+            json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "command": "agents",
+                    "agents": agents,
+                    "diagnostics": diagnostics,
+                    "skipped": skipped,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    elif args.format == "md":
+        rows = [
+            [a["stage"], a["name"], a["description"], "<br>".join(source_label(s, root) for s in a["sources"])]
+            for a in agents
+        ]
+        text = "\n".join(md_table(["Stage", "Agent", "Description", "Sources"], rows)) + "\n"
+    else:
+        width = max((len("%s/%s" % (a["stage"], a["name"])) for a in agents), default=0)
+        out = []
+        for a in agents:
+            labels = [source_label(s, root) for s in a["sources"]]
+            out.append("%-*s  %s" % (width, "%s/%s" % (a["stage"], a["name"]), labels[0]))
+            out += ["%s  + %s" % (" " * width, label) for label in labels[1:]]
+        text = "\n".join(out or ["No agents."]) + "\n"
+    if args.format != "json" or args.body:
+        for d in diagnostics:
+            print("gsd: %s: %s: %s" % (d["severity"], d["file"], d["message"]), file=sys.stderr)
+    return text, any(d["severity"] == "error" for d in diagnostics)
+
+
+# --------------------------------------------------------------------------
+# Project review rules
+
+
+RULES_REL = ".agents/rules/review/REVIEW.md"
+RULES_INDEX_REL = ".agents/rules/review/index.md"
+RULES_KEYS = (
+    "updated",
+    "version",
+    "risk_paths",
+    "always_high",
+    "review_focus",
+    "known_landmines",
+    "settled",
+    "nitpick_cap",
+    "rollback",
+)
+RULE_CLASSES = (
+    "auth",
+    "injection",
+    "secrets",
+    "data-exposure",
+    "input-validation",
+    "error-handling",
+    "race",
+    "idempotency",
+    "migration",
+    "resource-leak",
+    "edge-case",
+    "spec-gap",
+    "test-gap",
+    "convention",
+    "docs",
+    "other",
+)
+PROTECTED_CLASSES = ("race", "idempotency", "migration", "auth", "injection", "secrets", "data-exposure")
+UNLISTED_TIER = 1
+RULES_MIGRATION = (
+    "to migrate, rename the legacy file and update its index.md row or references, then create the "
+    "project review rules from the gsd template (templates/PROJECT-REVIEW.md)"
+)
+FIELD_SPLIT_RE = re.compile(r"\s+\|\s+")
+
+
+def rule_fields(entry):
+    return [part.strip() for part in FIELD_SPLIT_RE.split(entry.strip())]
+
+
+def glob_regex(pattern):
+    """A path glob: `**` crosses folders, `*` and `?` stay inside one."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    # DOTALL: git hands over file names with embedded newlines intact, and `**` must still cover them.
+    return re.compile("".join(out) + r"\Z", re.DOTALL)
+
+
+def glob_matches(pattern, path):
+    return bool(glob_regex(pattern.strip().lstrip("/")).match(path))
+
+
+def index_lists(text, name):
+    """Whether a repo-lens index.md table has a row whose File cell is `name`."""
+    file_column = None
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            file_column = None
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if all(re.fullmatch(r":?-+:?", cell) for cell in cells if cell):
+            continue
+        if file_column is None and "File" in cells:
+            file_column = cells.index("File")
+            continue
+        candidates = [cells[file_column]] if file_column is not None and file_column < len(cells) else cells
+        for cell in candidates:
+            target = re.sub(r"^\[[^\]]*\]\(([^)]+)\)$", r"\1", cell).strip("`").strip()
+            if target and os.path.normpath(target) == name:
+                return True
+    return False
+
+
+def legacy_uses(meta, index_text):
+    """The legacy roles a REVIEW.md in .agents/rules/review/ already has; any one keeps it out of the rules."""
+    uses = []
+    if "mode" in meta:
+        uses.append("GSD stage agent (its front matter has mode)")
+    if index_lists(index_text, "REVIEW.md"):
+        uses.append("review-critic repo lens (index.md lists it)")
+    return uses
+
+
+def collision_message(where, uses):
+    return "%s%s is a %s, so it is not read as project review rules; %s" % (
+        RULES_REL,
+        where,
+        " and a ".join(uses),
+        RULES_MIGRATION,
+    )
+
+
+def read_rules(root, rev):
+    """Return (rules text, index text) at `rev`, or from the working tree when `rev` is None."""
+    texts = []
+    for rel in (RULES_REL, RULES_INDEX_REL):
+        if rev is None:
+            path = os.path.join(root, rel)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    texts.append(handle.read())
+            else:
+                texts.append(None)
+        else:
+            code, out = git(root, "show", "%s:./%s" % (rev, rel))
+            texts.append(out if code == 0 else None)
+    return texts[0], texts[1]
+
+
+def structured_rules(text):
+    """Read only `risk_paths` and `always_high`; return (risk entries, always_high globs, problems)."""
+    meta, _, _, _, _ = parse_front_matter(text)
+    risk, problems = [], []
+    for entry in as_list(meta.get("risk_paths")):
+        fields = rule_fields(entry)
+        if len(fields) != 2 or not fields[0] or fields[1] not in ("0", "1", "2"):
+            problems.append('risk_paths entry %r is not "<glob> | <tier 0, 1 or 2>"; ignored' % entry)
+            continue
+        risk.append((fields[0], int(fields[1])))
+    return risk, as_list(meta.get("always_high")), problems
+
+
+def validate_rules(checkout):
+    """Diagnostics for the project review rules file in `checkout`, or [] when it has none."""
+    text, index_text = read_rules(checkout, None)
+    if text is None:
+        return []
+    path = os.path.join(checkout, RULES_REL)
+    meta, where, unsupported, found, _ = parse_front_matter(text)
+    uses = legacy_uses(meta if found else {}, index_text)
+    if uses:
+        return [diag("rules-collision", "warning", path, collision_message("", uses))]
+    if not found:
+        return [diag("rules-front-matter", "error", path, "project review rules need front matter between --- lines")]
+    out = [
+        diag("rules-front-matter", "error", path, "unsupported front matter: %s" % line.strip(), number)
+        for number, line in unsupported
+    ]
+
+    def bad(code, key, message):
+        out.append(diag(code, "error", path, message, where.get(key)))
+
+    for key in meta:
+        if key not in RULES_KEYS:
+            bad("rules-key", key, "unknown key %r (expected %s)" % (key, ", ".join(RULES_KEYS)))
+    for entry in as_list(meta.get("risk_paths")):
+        fields = rule_fields(entry)
+        if len(fields) != 2 or not fields[0]:
+            bad("rules-risk-path", "risk_paths", 'risk_paths entry %r is not "<glob> | <tier>"' % entry)
+        elif fields[1] not in ("0", "1", "2"):
+            bad("rules-tier", "risk_paths", "risk_paths entry %r has tier %r; expected 0, 1 or 2" % (entry, fields[1]))
+    for key in ("always_high", "review_focus"):
+        if isinstance(meta.get(key), str) and meta[key].strip():
+            bad("rules-list", key, "%s must be a list" % key)
+    for entry in as_list(meta.get("known_landmines")):
+        fields = rule_fields(entry)
+        if len(fields) != 3 or not all(fields):
+            bad(
+                "rules-landmine",
+                "known_landmines",
+                "known_landmines entry %r needs three fields: <glob> | <what bites> | <source>" % entry,
+            )
+    for entry in as_list(meta.get("settled")):
+        fields = rule_fields(entry)
+        if len(fields) != 6 or not all(fields):
+            bad(
+                "rules-settled",
+                "settled",
+                "settled entry %r needs six fields: <glob> | <symbol or *> | "
+                "<rule class> | <rejected claim> | <lasting reason> | <source>" % entry,
+            )
+        elif fields[2] in PROTECTED_CLASSES:
+            bad(
+                "rules-settled-protected",
+                "settled",
+                "settled entry %r is in the protected class %r; protected findings are never settled"
+                % (entry, fields[2]),
+            )
+        elif fields[2] not in RULE_CLASSES or fields[2] == "other":
+            bad(
+                "rules-settled-class",
+                "settled",
+                "settled entry %r has rule class %r; expected one of %s, never "
+                "other" % (entry, fields[2], ", ".join(c for c in RULE_CLASSES if c != "other")),
+            )
+    cap = meta.get("nitpick_cap")
+    if cap is not None and not (isinstance(cap, str) and re.fullmatch(r"\d+", cap)):
+        bad("rules-cap", "nitpick_cap", "nitpick_cap %r is not a whole number" % (cap,))
+    rollback = meta.get("rollback")
+    if not isinstance(rollback, str) or not rollback.strip():
+        bad("rules-rollback", "rollback", "rollback is missing; name how to undo a change in this repository")
+    return out
+
+
+def risk_rule_sets(root, base):
+    """[(label, rev or None)]: HEAD (or the working tree outside Git), then the base when given."""
+    sets: list[tuple[str, str | None]]
+    if git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")[0] == 0:
+        sets = [("HEAD", "HEAD")]
+    elif base:
+        raise UsageError("--base needs a Git checkout with commits")
+    else:
+        sets = [("working tree", None)]
+    if base:
+        code, sha = git(root, "rev-parse", "--verify", "--quiet", base + "^{commit}")
+        if code != 0:
+            raise UsageError("--base %r is not a commit" % base)
+        sets.append(("base %s" % sha.strip()[:7], sha.strip()))
+    return sets
+
+
+def risk_floor(tier, high):
+    if high or tier == 2:
+        return "L3"
+    return "L2" if tier == 1 else None
+
+
+def changed_paths(root, base):
+    """Paths changed between BASE and HEAD. --no-renames lists both sides of a move, so a file moved out of a
+    protected glob still matches it; -z keeps names with spaces or quotes intact."""
+    code, out = git(root, "diff", "--no-renames", "--name-only", "-z", base, "HEAD", "--")
+    if code != 0:
+        raise UsageError("cannot list the paths changed since %r" % base)
+    return [p for p in out.split("\0") if p]
+
+
+def cmd_risk(args, root):
+    if args.changed and not args.base:
+        raise UsageError("--changed needs --base")
+    if not args.paths and not args.changed:
+        raise UsageError("risk needs at least one PATH, or --base REV --changed")
+    rules, notes, loaded = [], [], []
+    sets = risk_rule_sets(root, args.base)
+    raw_paths = list(args.paths)
+    if args.changed:
+        raw_paths += [p for p in changed_paths(root, sets[-1][1]) if p not in raw_paths]
+    for label, rev in sets:
+        text, index_text = read_rules(root, rev)
+        entry: dict[str, Any] = {"rules": label, "state": "absent"}
+        if text is not None:
+            meta, _, _, found, _ = parse_front_matter(text)
+            uses = legacy_uses(meta if found else {}, index_text)
+            if uses:
+                entry.update(state="collision", message=collision_message(" (%s)" % label, uses))
+            else:
+                risk, high, problems = structured_rules(text)
+                entry.update(state="found", problems=problems)
+                loaded.append((label, risk, high))
+        if rev == "HEAD":
+            working, _ = read_rules(root, None)
+            if working != text:
+                notes.append("the working tree's %s differs from HEAD; risk reads HEAD" % RULES_REL)
+        rules.append(entry)
+    paths = []
+    for raw in raw_paths:
+        path = os.path.relpath(os.path.abspath(raw), root) if os.path.isabs(raw) else os.path.normpath(raw)
+        path = path.replace(os.sep, "/")
+        report = {
+            "path": path,
+            "tier": None,
+            "tier_sources": [],
+            "always_high": False,
+            "always_high_sources": [],
+            "floor": None,
+        }
+        if loaded:
+            tiers = []
+            for label, risk, _ in loaded:
+                hits = [(tier, glob) for glob, tier in risk if glob_matches(glob, path)]
+                tier = max(t for t, _ in hits) if hits else UNLISTED_TIER
+                tiers.append((tier, {"rules": label, "entry": next((g for t, g in hits if t == tier), None)}))
+            report["tier"] = max(t for t, _ in tiers)
+            report["tier_sources"] = [source for t, source in tiers if t == report["tier"]]
+            report["always_high_sources"] = [
+                {"rules": label, "glob": glob} for label, _, high in loaded for glob in high if glob_matches(glob, path)
+            ]
+            report["always_high"] = bool(report["always_high_sources"])
+            report["floor"] = risk_floor(report["tier"], report["always_high"])
+        paths.append(report)
+    floors = [p["floor"] for p in paths if p["floor"]]
+    floor = max(floors) if floors else None
+    if args.format == "json":
+        return (
+            json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "command": "risk",
+                    "file": RULES_REL,
+                    "rules": rules,
+                    "notes": notes,
+                    "paths": paths,
+                    "floor": floor,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    out = []
+    for entry in rules:
+        if entry["state"] == "absent":
+            out.append("No project review rules at %s (%s)." % (RULES_REL, entry["rules"]))
+        elif entry["state"] == "collision":
+            out.append("Collision: " + entry["message"])
+        else:
+            out.append("Project review rules: %s (%s)." % (RULES_REL, entry["rules"]))
+            out += ["Warning: " + problem for problem in entry["problems"]]
+    out += ["Note: " + note for note in notes]
+    if not loaded:
+        out.append("No tier or Risk floor comes from project review rules.")
+        return "\n".join(out) + "\n"
+
+    def source(s):
+        return "%s %s" % (s["rules"], s["entry"]) if s["entry"] else "%s unlisted" % s["rules"]
+
+    for p in paths:
+        high = ", ".join("%s %s" % (s["rules"], s["glob"]) for s in p["always_high_sources"]) or "no"
+        out.append(
+            "%s: tier %d (%s); always_high: %s; Risk floor: %s"
+            % (p["path"], p["tier"], "; ".join(source(s) for s in p["tier_sources"]), high, p["floor"] or "none")
+        )
+    out.append("Risk floor: %s" % (floor or "none"))
+    return "\n".join(out) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Finding fingerprints
+
+
+PROTECTED_VALUES = ("no", "unsure", "security", "migration", "idempotency", "concurrency")
+FINGERPRINT_RE = re.compile(r"([^\s#`]+)#(.+):([a-z-]+)")
+LENS_RE = re.compile(r"[a-z][a-z0-9-]*")
+REVIEWER_ID_RE = re.compile(r"\s*\(([A-Za-z]+[0-9]+)\)\s*$")
+
+
+def label_value(found, label):
+    value = found.get(label)
+    return (value[0].strip().rstrip(".").strip(), value[1]) if value else (None, None)
+
+
+def parse_fingerprints(value):
+    """([fingerprint text], problem). Backticked fingerprints, comma-separated when verifiers differ; text outside
+    the backticks is a note. Without backticks the first word is the fingerprint."""
+    if not value.strip():
+        return [], "is empty"
+    parts = re.findall(r"`([^`]+)`", value) or [value.split()[0].rstrip(",;")]
+    out = []
+    for part in parts:
+        match = FINGERPRINT_RE.fullmatch(part.strip())
+        if not match or not match.group(2).strip():
+            return [], "%r is not <path>#<symbol>:<rule class>" % part
+        if match.group(3) not in RULE_CLASSES:
+            return [], "%r has rule class %r; expected one of %s" % (part, match.group(3), ", ".join(RULE_CLASSES))
+        out.append(part.strip())
+    return out, None
+
+
+def parse_protected(value):
+    """([values], problem). One value, or one per verifier comma-separated; a parenthesis or a " - " note is allowed."""
+    head = re.sub(r"\([^)]*\)", "", re.split(r"\s+-\s+", value, maxsplit=1)[0])
+    words = [first_word(piece) for piece in head.split(",") if piece.strip()]
+    bad = [w or piece.strip() for w, piece in zip(words, head.split(",")) if w not in PROTECTED_VALUES]
+    if not words or bad:
+        # Keep the values that did parse, so a recognised "security" survives a malformed neighbour.
+        return (
+            [w for w in words if w in PROTECTED_VALUES],
+            "%r is not %s (one per verifier, comma-separated)" % (value, ", ".join(PROTECTED_VALUES)),
+        )
+    return words, None
+
+
+def parse_lens(value):
+    word = value.split()[0].strip("`.,;") if value.split() else ""
+    return (word, None) if LENS_RE.fullmatch(word) else (None, "%r is not a lens name" % value)
+
+
+def finding_metadata_problems(rid, found, number):
+    """Format problems in a finding's Lens, Fingerprint and Protected fields. A record with none of the three
+    (written before they existed) is not reported; one with only some of them is."""
+    present = [label for label in ("lens", "fingerprint", "protected") if label in found]
+    problems = []
+    if present and len(present) < 3:
+        missing = [label.capitalize() for label in ("lens", "fingerprint", "protected") if label not in found]
+        problems.append(
+            (
+                "finding-metadata",
+                "%s has %s but no %s" % (rid, ", ".join(label.capitalize() for label in present), ", ".join(missing)),
+                number,
+            )
+        )
+    for label, parse in (("lens", parse_lens), ("fingerprint", parse_fingerprints), ("protected", parse_protected)):
+        value, line = label_value(found, label)
+        if value is None:
+            continue
+        _, problem = parse(value)
+        if problem:
+            problems.append(("finding-" + label, "%s %s %s" % (rid, label.capitalize(), problem), line))
+    return problems
+
+
+def finding_outcome(verified, disposition):
+    if disposition == "open" or disposition not in DISPOSITIONS:
+        return "open"
+    if verified == "refuted" or disposition == "accepted":
+        return "rejected"
+    return "fixed"
+
+
+def item_findings(item):
+    """Each R- record in the item's REVIEW.md, with what the repeat filter needs."""
+    text = read_text(item, "REVIEW.md") if os.path.isfile(os.path.join(item.path, "REVIEW.md")) else None
+    return findings_in_text(text) if text is not None else []
+
+
+def findings_in_text(text):
+    """Each R- record in a REVIEW.md text."""
+    heads = {n: line for n, line, _ in markdown_lines(text)}
+    out = []
+    for rid, number, lines in record_sections(text, "R"):
+        found = labels_in(lines)
+        head = HEADING_RE.match(heads[number])
+        assert head is not None  # record_sections starts every record at a heading
+        heading = head.group(2).replace("**", "").strip()
+        reviewer = REVIEWER_ID_RE.search(heading)
+        title = re.sub(r"^%s\b\s*[-:]?\s*" % re.escape(rid), "", REVIEWER_ID_RE.sub("", heading)).strip()
+        values = {
+            label: label_value(found, label)[0]
+            for label in (
+                "severity",
+                "evidence",
+                "lens",
+                "fingerprint",
+                "protected",
+                "verified",
+                "disposition",
+                "resolution",
+            )
+        }
+        disposition = first_word(values["disposition"] or "")
+        verified = first_word(values["verified"] or "")
+        parsers = (("fingerprint", parse_fingerprints), ("protected", parse_protected), ("lens", parse_lens))
+        parsed: dict[str, tuple[object, object]] = {
+            label: parse(values[label]) for label, parse in parsers if values[label]
+        }
+        # A record written before these fields existed has none of them and is exempt; one that has any must have all,
+        # so an empty or missing field among them cannot drop a classification.
+        if any(label in found for label, _ in parsers):
+            for label, _ in parsers:
+                if not values[label]:
+                    parsed[label] = ([] if label != "lens" else None, "is empty or missing")
+        fingerprints = parsed["fingerprint"][0] if "fingerprint" in parsed else []
+        protected = parsed["protected"][0] if "protected" in parsed else []
+        lens = parsed["lens"][0] if "lens" in parsed else None
+        unreadable = sorted(label.capitalize() for label, (_, problem) in parsed.items() if problem)
+        outcome = finding_outcome(verified, disposition)
+        reason = values["resolution"] or re.sub(r"^\w+\s*[-:]?\s*", "", values["disposition"] or "")
+        out.append(
+            {
+                "id": rid,
+                "reviewer_id": reviewer.group(1) if reviewer else None,
+                "title": title,
+                "line": number,
+                "severity": first_word(values["severity"] or "") or None,
+                "lens": lens,
+                "fingerprints": fingerprints,
+                "protected": protected,
+                "unreadable": unreadable,
+                "verified": verified or None,
+                "disposition": disposition or None,
+                "outcome": outcome,
+                "problem": ". ".join(p for p in (title, values["evidence"]) if p),
+                "reason": reason if outcome == "rejected" else None,
+            }
+        )
+    return out
+
+
+def cmd_fingerprints(item, fmt):
+    findings = item_findings(item)
+    if fmt == "json":
+        return (
+            json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "command": "fingerprints",
+                    "item": item.path,
+                    "file": os.path.join(item.path, "REVIEW.md"),
+                    "findings": findings,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    out = []
+    for f in findings:
+        out.append(
+            "%s%s  %s  protected: %s  %s  %s"
+            % (
+                f["id"],
+                " (%s)" % f["reviewer_id"] if f["reviewer_id"] else "",
+                ", ".join(f["fingerprints"]) or "no fingerprint",
+                ", ".join(f["protected"]) or "-",
+                f["outcome"],
+                f["title"],
+            )
+        )
+    return "\n".join(out or ["No findings in %s." % os.path.join(item.path, "REVIEW.md")]) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Security gate
+
+
+SECURITY_CLASSES = ("auth", "injection", "secrets", "data-exposure")
+GATE_LINE_RE = re.compile(r"^\s*(?:[-*+]\s+|#{1,6}\s+)?security gate\s*:\s*applies\b", re.IGNORECASE)
+NOT_ACCEPT_RE = re.compile(
+    r"\bnot(?:\s+\w+){0,2}\s+accept|\bpending\b|\bdeclin|\bwithdr(?:aw|ew|awn)\b|\breject", re.IGNORECASE
+)
+# A finding is released only in one canonical form, written by the agent; anything else stays open. Strict on
+# purpose - a false block costs a rewrite, a false release ships a security defect.
+FIX_VERIFIED_RE = re.compile(r"\s*fix\s+verified\s+by\s+a\s+fresh\s+verifier\b", re.IGNORECASE)
+FIX_QUALIFIED_RE = re.compile(
+    r"\b(?:not|never|yet|pending|awaiting|await|once|until|unless|failed|fails|refuted|refutes|disputed"
+    r"|unverifiable|unconfirmed|unverified|partly|partially|still|remains?|cannot|exploit\w*|reproduc(?:es|ed|ible)"
+    r"|bypass\w*)\b|n['\u2019]t\b",
+    re.IGNORECASE,
+)
+FIX_REVISION_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+FIX_CITATION_RE = re.compile(r"research/verification/[^\s()\[\]]+\.json")
+# Anchored at the start of the user's quote, so a question such as "Should I accept R-01?" never matches.
+ACCEPT_NAMED_RE = r"^\s*(?:I\s+)?accept(?:s|ed)?\s+(?:(?:security\s+)?finding\s+)?%s(?!\d)"
+ACCEPT_QUALIFIED_RE = re.compile(
+    r"\b(?:not|no|cannot|never|refuse\w*|reject\w*|(?:re)?open\w*|unresolved|unless|until|if)\b|n['\u2019]t\b",
+    re.IGNORECASE,
+)
+QUOTE_RE = re.compile(r'"([^"]+)"|\u201c([^\u201d]+)\u201d')
+AGENT_RE = re.compile(
+    r"\b(?:agent|assistant|claude|codex|pi|implementer|orchestrator|reviewer|verifier)\b", re.IGNORECASE
+)
+AGENT_DECIDED_RE = re.compile(
+    r"\b(?:the\s+)?agent\s+(?:accept|settl|decid|judg)|\bby\s+the\s+agent\b" r"|\bown\s+judge?ment\b", re.IGNORECASE
+)
+
+
+def security_gated(review_text):
+    """Whether REVIEW.md records "Security gate: applies". Once recorded the gate stays on, so any such line counts,
+    whatever a later line says."""
+    return any(
+        GATE_LINE_RE.match(line.replace("**", "")) for _, line, code in markdown_lines(review_text or "") if not code
+    )
+
+
+def security_kinds(finding):
+    """Why a finding is security in kind: the security lens, a security rule class or `Protected: security` from any
+    verifier, whichever lens raised it."""
+    kinds = []
+    if finding["lens"] == "security":
+        kinds.append("lens security")
+    matched = (FINGERPRINT_RE.fullmatch(f) for f in finding["fingerprints"])
+    classes = sorted({m.group(3) for m in matched if m} & set(SECURITY_CLASSES))
+    kinds += ["class %s" % c for c in classes]
+    if "security" in finding["protected"]:
+        kinds.append("Protected: security")
+    if finding.get("unreadable"):
+        # A field the gate cannot read might have said security; fail closed rather than drop the finding.
+        kinds.append("unreadable %s" % ", ".join(finding["unreadable"]))
+    return kinds
+
+
+def verifier_confirms(path, ids, revision):
+    """Whether a saved verifier reply confirms the fix of one of `ids` on `revision` (either may be the shorter)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            reply = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(reply, dict):
+        return False
+    rev = str(reply.get("revision") or "").lower()
+    return (
+        reply.get("result") == "confirmed"
+        and str(reply.get("id") or "") in ids
+        and len(rev) >= 7
+        and (rev.startswith(revision) or revision.startswith(rev))
+    )
+
+
+def fix_confirmed(resolution, item_path=None, ids=()):
+    """Whether a Resolution ends with a sentence that begins "Fix verified by a fresh verifier", states it rather than
+    asks it, does not qualify it, and names the fixed revision and the verifier's saved reply - a file that exists in
+    the item when `item_path` is given, and whose reply confirms the fix of one of `ids` (the finding's R- ID) on that
+    revision. Only the last sentence counts, so no later sentence can take it back."""
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", (resolution or "").strip()) if s.strip()]
+    last = sentences[-1] if sentences else ""
+    if not (FIX_VERIFIED_RE.match(last) and not FIX_QUALIFIED_RE.search(last) and not last.rstrip().endswith("?")):
+        return False
+    cited = FIX_CITATION_RE.findall(last)
+    revision = FIX_REVISION_RE.search(FIX_CITATION_RE.sub("", last))
+    if not revision or not cited:
+        return False
+    if item_path is None:
+        return True
+    paths = [os.path.normpath(os.path.join(item_path, path)) for path in cited]
+    # A citation must stay inside the item's research/verification/, so "../" cannot point at a reply elsewhere.
+    inside = os.path.join(os.path.normpath(item_path), "research", "verification") + os.sep
+    if not all(path.startswith(inside) for path in paths):
+        return False
+    return all(os.path.isfile(path) for path in paths) and any(
+        verifier_confirms(path, set(ids), revision.group(0).lower()) for path in paths
+    )
+
+
+def user_quotes(bullet):
+    """The quoted statements a DECISIONS.md bullet attributes to a person who is not an agent: `(Sam: "...")` or a
+    quote the bullet closes with ` - Sam`."""
+    out = []
+    for m in QUOTE_RE.finditer(bullet):
+        speaker = re.search(r"([A-Za-z][\w.' -]{0,40}?)\s*:\s*$", bullet[: m.start()])
+        if not speaker:
+            speaker = re.match(r"\s*\)?\s*[-\u2013]\s+([A-Za-z][\w.' -]{0,40}?)\s*\.?\s*$", bullet[m.end() :])
+        if speaker and not AGENT_RE.search(speaker.group(1)):
+            out.append(m.group(1) or m.group(2))
+    return out
+
+
+def user_acceptance_named(decisions_text, rid):
+    """The user's own words, quoted on a DECISIONS.md bullet, say "accept <R- ID>" with no negation or open-state word.
+    A bullet that says the agent decided, or an acceptance that names the package rather than the finding, does not
+    count."""
+    named = re.compile(ACCEPT_NAMED_RE % re.escape(rid), re.IGNORECASE)
+    for bullet in decision_bullets(decisions_text or ""):
+        if AGENT_DECIDED_RE.search(bullet) or NOT_ACCEPT_RE.search(bullet):
+            continue
+        if any(named.search(q) and "?" not in q and not ACCEPT_QUALIFIED_RE.search(q) for q in user_quotes(bullet)):
+            return True
+    return False
+
+
+def open_security_findings(item):
+    """[(finding, kinds, why it is still open)] for the security findings of the item's REVIEW.md that are not
+    released. A refuted finding is never open; a resolved one is released only by the canonical "Fix verified by a
+    fresh verifier" sentence in its Resolution; an accepted one only by the user's quoted "I accept <R- ID>" in
+    DECISIONS.md."""
+    review = item.docs.get("REVIEW.md")
+    if review is None:
+        return []
+    earlier = security_in_history(item)
+    resolutions = {}
+    for rid, _, lines in record_sections(review, "R"):
+        resolutions[rid] = label_value(labels_in(lines), "resolution")[0] or ""
+    out = []
+    current = item_findings(item)
+    for finding in current:
+        kinds = security_kinds(finding) or (["security in an earlier commit"] if finding["id"] in earlier else [])
+        if not kinds or finding["verified"] == "refuted":
+            continue
+        disposition, rid = finding["disposition"], finding["id"]
+        if disposition == "resolved":
+            # Only the R- ID is unique in the item; reviewer IDs such as F1 recur across reviews.
+            if fix_confirmed(resolutions.get(rid, ""), item.path, [rid]):
+                continue
+            why = (
+                'resolved, but its Resolution does not end with "Fix verified by a fresh verifier on <revision>" '
+                "citing a saved reply that confirms this finding's fix on that revision"
+            )
+        elif disposition == "accepted":
+            if user_acceptance_named(item.docs.get("DECISIONS.md"), rid):
+                continue
+            why = (
+                'accepted, but no DECISIONS.md entry quotes the user saying "I accept %s" without a negation '
+                "or open-state word" % rid
+            )
+        else:
+            why = "open"
+        out.append((finding, kinds, why))
+    present = {finding["id"] for finding in current}
+    for rid, finding in sorted(earlier.items()):
+        if rid not in present and finding["verified"] != "refuted":
+            out.append((dict(finding, line=1), ["security in an earlier commit"], "removed from REVIEW.md"))
+    return out
+
+
+def review_history(item):
+    """The text of every committed version of the item's REVIEW.md, following moves; [] outside Git. Cached."""
+    if getattr(item, "_review_history", None) is not None:
+        return item._review_history
+    texts = []
+
+    def git(*args):
+        return subprocess.run(["git", "-C", item.path, *args], capture_output=True, text=True, check=False, timeout=30)
+
+    try:
+        log = git("log", "--follow", "--format=%x00%H", "--name-only", "--", "REVIEW.md")
+        for entry in log.stdout.split("\0")[1:] if log.returncode == 0 else []:
+            lines = [line for line in entry.splitlines() if line.strip()]
+            if len(lines) < 2:
+                continue
+            shown = git("show", "%s:%s" % (lines[0], lines[1]))
+            if shown.returncode == 0:
+                texts.append(shown.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        texts = []
+    item._review_history = texts
+    return texts
+
+
+def gate_in_history(item):
+    """Whether any committed version of the item's REVIEW.md records the gate line as security_gated reads it."""
+    return any(security_gated(text) for text in review_history(item))
+
+
+def security_in_history(item):
+    """{R- ID: title} of every finding that was security in kind in any committed version of REVIEW.md. The kind is
+    sticky like the gate: stripping or relabelling a record's fields, or deleting the record, does not clear it."""
+    out = {}
+    for text in review_history(item):
+        for finding in findings_in_text(text):
+            if security_kinds(finding):
+                out.setdefault(finding["id"], finding)
+    return out
+
+
+def validate_security_gate(item):
+    review = item.docs.get("REVIEW.md")
+    gated = security_gated(review)
+    if not gated and gate_in_history(item):
+        # The gate is sticky: a line removed or reworded, or REVIEW.md deleted, does not turn it off.
+        gated = True
+        item.diagnostics.append(
+            diag(
+                "security-gate-removed",
+                "error",
+                os.path.join(item.path, "REVIEW.md"),
+                'an earlier commit of REVIEW.md records "Security gate: applies", but %s; '
+                "the gate stays on - restore it" % ("the line is gone" if review is not None else "REVIEW.md is gone"),
+                1,
+            )
+        )
+    found = open_security_findings(item) if gated else []
+    item.counts["security_gate"] = {"gated": gated, "open": [f["id"] for f, _, _ in found]}
+    if not found:
+        return
+    path = os.path.join(item.path, "REVIEW.md")
+    final = item.docs.get("FINAL.md")
+    closing = [
+        what
+        for what, on in (
+            ("FINAL.md exists", final is not None and not has_superseded_notice(final)),
+            ("stage is complete", item.meta.get("stage") == "complete"),
+            ("delivery is verified", item.meta.get("delivery") == "verified"),
+        )
+        if on
+    ]
+    for finding, kinds, why in found:
+        rid = finding["id"]
+        if why != "open":
+            item.diagnostics.append(
+                diag(
+                    "security-release",
+                    "warning",
+                    path,
+                    "%s (%s) is %s; it still blocks close-out" % (rid, ", ".join(kinds), why),
+                    finding["line"],
+                )
+            )
+        if closing:
+            item.diagnostics.append(
+                diag(
+                    "security-gate-open",
+                    "error",
+                    path,
+                    "the security gate applies and %s is an open security finding (%s), but %s; close-out waits for a "
+                    "fix a fresh verifier confirms or the user's acceptance in DECISIONS.md naming %s"
+                    % (rid, ", ".join(kinds), " and ".join(closing), rid),
+                    finding["line"],
+                )
+            )
+
+
+# --------------------------------------------------------------------------
+# Command line
+
+
+def default_root():
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+    except OSError:
+        top = ""
+    return top or os.getcwd()
+
+
+def select(items, refs):
+    chosen = []
+    for ref in refs:
+        path = os.path.abspath(ref)
+        if os.path.basename(path) == "IDEA.md":
+            path = os.path.dirname(path)
+        matches = (
+            [i for i in items if i.path == path or os.path.realpath(i.path) == os.path.realpath(path)]
+            if os.path.exists(path)
+            else []
+        )
+        if not matches:
+            matches = [i for i in items if ref in (i.folder, i.slug)]
+        if not matches:
+            raise UsageError("no item matches %r" % ref)
+        if len(matches) > 1:
+            raise UsageError("%r matches several items:\n  %s" % (ref, "\n  ".join(i.path for i in matches)))
+        if matches[0] not in chosen:
+            chosen.append(matches[0])
+    return chosen
+
+
+def parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", help="directory to search (default: current Git working tree)")
+    common.add_argument("--all", action="store_true", help="include completed and cancelled items")
+    common.add_argument("--format", choices=("text", "md", "json"), default="text")
+    common.add_argument(
+        "--exclude", action="append", default=[], metavar="GLOB", help="skip directories matching GLOB (repeatable)"
+    )
+    top = argparse.ArgumentParser(prog="gsd", description="Inventory, validate and safely update GSD work items.")
+    sub = top.add_subparsers(dest="command")
+    for name, text in (
+        ("status", "one row per item (default)"),
+        ("attention", "items needing attention"),
+        ("next", "next actions, approvals and blocked items"),
+        ("progress", "stage and record counts"),
+        ("legacy", "legacy migration candidates"),
+    ):
+        sub.add_parser(name, parents=[common], help=text)
+    validate = sub.add_parser("validate", parents=[common], help="report diagnostics")
+    validate.add_argument("items", nargs="*", metavar="ITEM", help="slug, item folder or IDEA.md path")
+    validate.add_argument("--strict", action="store_true", help="fail on warnings too")
+
+    owner = sub.add_parser("owner", parents=[common], help="show or change the owning checkout")
+    owner.add_argument("action", choices=("show", "set", "unset"))
+    owner.add_argument("checkout", nargs="?", help="owning checkout for set (default: this checkout)")
+    owner.add_argument("--item", help="map one item slug rather than the whole repository")
+    owner.add_argument("--every", action="store_true", help="show entries for every repository")
+
+    new = sub.add_parser("new", parents=[common], help="create IDEA.md for a new item")
+    new.add_argument("title")
+    new.add_argument("--slug", help="folder name without the date (default: from the branch or title)")
+    new.add_argument("--type", choices=TYPES, default="feature")
+    new.add_argument("--purpose")
+    new.add_argument("--next-action", dest="next_action")
+    new.add_argument("--responsible", choices=RESPONSIBLE, default="agent")
+
+    setp = sub.add_parser("set", parents=[common], help="change IDEA.md front-matter fields")
+    setp.add_argument("item", metavar="ITEM")
+    setp.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
+    setp.add_argument("--expect", metavar="SHA256", help="refuse unless IDEA.md has this digest")
+
+    plan = sub.add_parser("plan", parents=[common], help="write planning records only")
+    plan.add_argument("item", metavar="ITEM")
+    plan.add_argument("--write", metavar="DOC", help="replace PLAN.md, SPEC.md, TODO.md or DECISIONS.md from stdin")
+    plan.add_argument("--set", action="append", metavar="KEY=VALUE", help="next_action, responsible or stage")
+    plan.add_argument("--expect", metavar="SHA256", help="refuse unless the target has this digest")
+
+    prune = sub.add_parser("prune", parents=[common], help="move complete and cancelled items to docs/gsd/YYYY/MM/")
+    prune.add_argument("items", nargs="*", metavar="ITEM")
+    prune.add_argument("--dry", action="store_true", help="preview only")
+
+    compact = sub.add_parser(
+        "compact", parents=[common], help="replace a closed item's folder with its committed docs/gsd summary"
+    )
+    compact.add_argument("item", metavar="ITEM")
+    compact.add_argument("--dry", action="store_true", help="preview only")
+
+    fold = sub.add_parser(
+        "fold",
+        parents=[common],
+        help="remove a closed item's folder, leaving nothing in docs/gsd; Git keeps the record",
+    )
+    fold.add_argument("item", metavar="ITEM")
+    fold.add_argument(
+        "--record", required=True, metavar="SHA", help="full SHA of the commit that holds the item folder as it is now"
+    )
+    fold.add_argument("--dry", action="store_true", help="preview only")
+
+    reopen = sub.add_parser("reopen", parents=[common], help="reopen a complete or cancelled item")
+    reopen.add_argument("item", metavar="ITEM")
+    reopen.add_argument("--stage", choices=STAGES[:-1])
+    reopen.add_argument("--delivery", choices=DELIVERIES[:-2])
+    reopen.add_argument("--reason")
+    reopen.add_argument("--dry", action="store_true", help="preview only")
+
+    comments = sub.add_parser("comments", parents=[common], help="list human comments or assign their IDs")
+    comments.add_argument("items", nargs="*", metavar="ITEM")
+    comments.add_argument("--assign", action="store_true", help="add markers for unassigned comments")
+
+    agents = sub.add_parser("agents", help="resolve stage agents from the skill, user and repo layers")
+    agents.add_argument("stage", nargs="?", metavar="STAGE", help=", ".join(AGENT_STAGES))
+    agents.add_argument("name", nargs="?", metavar="NAME", help="agent whose composed brief --body prints")
+    agents.add_argument("--all", action="store_true", help="every stage")
+    agents.add_argument("--body", action="store_true", help="print one agent's composed brief")
+    agents.add_argument("--root", help="repository root (default: current Git working tree)")
+    agents.add_argument("--format", choices=("text", "md", "json"), default="text")
+
+    fingerprints = sub.add_parser(
+        "fingerprints",
+        parents=[common],
+        help="list the findings in an item's REVIEW.md for the packet's known-findings.json",
+    )
+    fingerprints.add_argument("item", metavar="ITEM")
+
+    risk = sub.add_parser("risk", help="tier, always_high match and Risk floor per path from the project review rules")
+    risk.add_argument("paths", nargs="*", metavar="PATH", help="path relative to the repository root")
+    risk.add_argument("--base", metavar="REV", help="also read the rules at REV and take the higher tier")
+    risk.add_argument(
+        "--changed",
+        action="store_true",
+        help="also check every path changed from --base to HEAD, both sides of a rename",
+    )
+    risk.add_argument("--root", help="repository root (default: current Git working tree)")
+    risk.add_argument("--format", choices=("text", "json"), default="text")
+    return top, common
+
+
+COMMANDS = {
+    "status",
+    "attention",
+    "next",
+    "progress",
+    "legacy",
+    "validate",
+    "owner",
+    "new",
+    "set",
+    "plan",
+    "prune",
+    "compact",
+    "fold",
+    "reopen",
+    "comments",
+    "agents",
+    "risk",
+    "fingerprints",
+}
+
+
+def render_moves(command, results, fmt):
+    if fmt == "json":
+        return json.dumps({"schema": SCHEMA, "command": command, "results": results}, indent=2, sort_keys=True) + "\n"
+    out = []
+    for r in results:
+        if "skipped" in r:
+            out.append("skip %s: %s" % (r["path"], r["skipped"]))
+            continue
+        if r.get("folded"):
+            out.append("remove %s (folded; nothing left in docs/gsd)" % r["from"])
+        elif r.get("compacted"):
+            out.append("remove %s (summary %s)" % (r["from"], r["to"]))
+        else:
+            out.append("move %s -> %s" % (r["from"], r["to"]) if r["from"] != r["to"] else "update %s" % r["from"])
+        out += ["  rebase links in %s" % p for p in r.get("rewrites", [])]
+        if r.get("lifecycle_unticked"):
+            out.append("  untick Lifecycle stages: " + ", ".join(r["lifecycle_unticked"]))
+        if r.get("trailer"):
+            out.append("  commit trailer: " + r["trailer"])
+    return "\n".join(out or ["Nothing to do."]) + "\n"
+
+
+def render_comments(items, fmt):
+    rows = [dict(c, item=i.slug) for i in items for c in i.comments]
+    if fmt == "json":
+        return json.dumps({"schema": SCHEMA, "command": "comments", "comments": rows}, indent=2, sort_keys=True) + "\n"
+    if fmt == "md":
+        return (
+            "\n".join(
+                md_table(
+                    ["Item", "ID", "Status", "Where", "Text"],
+                    [
+                        [
+                            c["item"],
+                            c["id"] or "",
+                            c["status"],
+                            "%s:%d" % (c["file"], c["line"]),
+                            c["text"].splitlines()[0],
+                        ]
+                        for c in rows
+                    ],
+                )
+                or []
+            )
+            + "\n"
+        )
+    out = [
+        "%s  %s  %s  %s:%d  %s"
+        % (c["item"], c["id"] or "-", c["status"], c["file"], c["line"], c["text"].splitlines()[0])
+        for c in rows
+    ]
+    return "\n".join(out or ["No comments."]) + "\n"
+
+
+def one(items, ref):
+    return select(items, [ref])[0]
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    top, common = parser()
+    if not argv or (argv[0] not in COMMANDS and argv[0] not in ("-h", "--help")):
+        argv = ["status"] + argv
+    try:
+        args = top.parse_args(argv)
+    except SystemExit as exit_:
+        return 0 if exit_.code == 0 else 2
+    root = os.path.abspath(os.path.expanduser(args.root)) if args.root else default_root()
+    if not os.path.isdir(root):
+        print("gsd: root %s is not a directory" % root, file=sys.stderr)
+        return 2
+    command = args.command
+    try:
+        if command == "owner":
+            if args.action == "show":
+                entries, identity = cmd_owner(args, root)
+                entries = cast("list[dict[str, str]]", entries)
+                if args.format == "json":
+                    sys.stdout.write(
+                        json.dumps(
+                            {
+                                "schema": SCHEMA,
+                                "command": "owner",
+                                "repo": identity,
+                                "file": owners_path(),
+                                "owners": entries,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+                else:
+                    sys.stdout.write("repo %s\nfile %s\n" % (identity, owners_path()))
+                    for e in entries:
+                        sys.stdout.write(
+                            "%s%s -> %s\n" % (e["repo"], (" [%s]" % e["slug"]) if e.get("slug") else "", e["checkout"])
+                        )
+                return 0
+            paths, _ = cmd_owner(args, root)
+            sys.stdout.write(written("owner", paths, args.format))
+            return 0
+        if command == "new":
+            sys.stdout.write(written("new", cmd_new(args, root), args.format))
+            return 0
+        if command == "agents":
+            text, failed = cmd_agents(args, root)
+            sys.stdout.write(text)
+            return 1 if failed else 0
+        if command == "risk":
+            sys.stdout.write(cmd_risk(args, root))
+            return 0
+        git_checks = command in ("validate", "attention", "progress")
+        items, legacy, scan = build(root, args.exclude, git_checks)
+        if command == "validate":
+            chosen = select(items, args.items) if args.items else items
+            checkouts = sorted({root} | {i.checkout for i in chosen})
+            rules = [d for checkout in checkouts for d in validate_rules(checkout)]
+            text, failed = render_validate(
+                root, chosen, (scan if not args.items else []) + rules, args.format, args.strict
+            )
+            sys.stdout.write(text)
+            return 1 if failed else 0
+        if command == "set":
+            item = one(items, args.item)
+            sys.stdout.write(
+                written("set", apply_idea_changes(item, parse_assignments(args.pairs), args.expect), args.format)
+            )
+            return 0
+        if command == "plan":
+            sys.stdout.write(written("plan", cmd_plan(args, one(items, args.item)), args.format))
+            return 0
+        if command == "fingerprints":
+            if args.format == "md":
+                raise UsageError("fingerprints prints text or json")
+            sys.stdout.write(cmd_fingerprints(one(items, args.item), args.format))
+            return 0
+        if command == "prune":
+            results = cmd_prune(items, args.items, args.dry)
+            sys.stdout.write(render_moves("prune", results, args.format))
+            return 0
+        if command == "compact":
+            result = cmd_compact(one(items, args.item), args.dry)
+            sys.stdout.write(render_moves("compact", [result], args.format))
+            return 0
+        if command == "fold":
+            result = cmd_fold(one(items, args.item), args.record, args.dry)
+            sys.stdout.write(render_moves("fold", [result], args.format))
+            return 0
+        if command == "reopen":
+            result = cmd_reopen(one(items, args.item), args)
+            sys.stdout.write(render_moves("reopen", [result], args.format))
+            return 0
+        if command == "comments":
+            chosen = select(items, args.items) if args.items else visible(items, args.all)
+            if args.assign:
+                if len(chosen) != 1 or not args.items:
+                    raise UsageError("comments --assign needs exactly one ITEM")
+                sys.stdout.write(written("comments", cmd_comments_assign(chosen[0]), args.format))
+                return 0
+            sys.stdout.write(render_comments(chosen, args.format))
+            return 0
+    except UsageError as error:
+        print("gsd: %s" % error, file=sys.stderr)
+        return 2
+    except Refused as error:
+        print("gsd: refused: %s" % error, file=sys.stderr)
+        return 1
+    except Conflict as error:
+        print("gsd: conflict: %s" % error, file=sys.stderr)
+        return 3
+    except OSError as error:
+        print("gsd: conflict: %s" % error, file=sys.stderr)
+        return 3
+    shown = visible(items, args.all, command)
+    sys.stdout.write(render(command, root, shown, legacy, scan, args.format))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Modernise branch"
+  short_description: "Rebase and reassess a stale branch"
+  default_prompt: "Use $modernise to update this branch and present close, amend or merge options."
+policy:
+  allow_implicit_invocation: false

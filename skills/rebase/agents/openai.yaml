@@ -1,0 +1,6 @@
+interface:
+  display_name: "Rebase"
+  short_description: "Run or finish a git rebase in place, resolving conflicts; encrypted files go back to the user"
+  default_prompt: "Check for a rebase in progress; resolve the conflicts in place, or ask me what to rebase."
+policy:
+  allow_implicit_invocation: true

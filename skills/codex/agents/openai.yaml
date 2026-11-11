@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex CLI"
+  short_description: "Delegate tasks through the Codex CLI"
+  default_prompt: "Use $codex to run this task with the appropriate CLI command, model, reasoning effort, and permissions."
+
+policy:
+  allow_implicit_invocation: true

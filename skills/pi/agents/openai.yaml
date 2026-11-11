@@ -1,0 +1,7 @@
+interface:
+  display_name: "pi CLI"
+  short_description: "Delegate tasks to pi on the user's model gateway routes"
+  default_prompt: "Use $pi to run this task with the appropriate route, thinking level, tools, and guards."
+
+policy:
+  allow_implicit_invocation: true

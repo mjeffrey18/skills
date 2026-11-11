@@ -1,0 +1,7 @@
+interface:
+  display_name: "Review loop"
+  short_description: "Scope a change and loop a cross-agent review on it"
+  default_prompt: "Use $review-loop-engine to scope this change and run a cross-agent review loop."
+
+policy:
+  allow_implicit_invocation: true

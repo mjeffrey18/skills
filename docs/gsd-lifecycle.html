@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GSD lifecycle - stage by stage</title>
+<!-- How a tiered GSD item runs: the HITL Checkpoints item (phases 1 and 2, PR delivery), on top of workflow-v2 and review-system phase 1.
+     Source of truth: skills/gsd/references/workflow.md, specialists.md, complexity.md and documents.md; update this page when those change.
+     The :root values are fallbacks for a plain browser. -->
+<style>
+:root{--background:#0f1115;--foreground:#e6e8ec;--muted:#2a2e36;--muted-foreground:#9aa1ad;--secondary:#22262e;--secondary-foreground:#e6e8ec;
+--border:#30353f;--ring:#5b8def;--accent-surface:#1d2b3f;--accent-surface-foreground:#cfe0ff;--card:#181b21;--card-foreground:#e6e8ec;
+--success:#16a34a;--warning:#f59e0b;--info:#3b82f6;--code-background:#22262e;--radius:8px;
+--font-sans:system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:light){:root{--background:#ffffff;--foreground:#1a1d23;--muted:#eceef2;--muted-foreground:#5f6672;--secondary:#f1f3f6;
+--secondary-foreground:#1a1d23;--border:#d9dde3;--accent-surface:#e5efff;--accent-surface-foreground:#123a7a;--card:#f6f7f9;--card-foreground:#1a1d23;--code-background:#eef0f3}}
+html{background:var(--background)}
+body{font-family:var(--font-sans);color:var(--foreground);margin:0;padding:24px 28px}
+.wrap{display:flex;flex-direction:column;gap:14px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.top h1{margin:0;font-size:19px}
+.tiers{display:flex;gap:4px;align-items:center;font-size:12px;color:var(--muted-foreground)}
+.tb{font-family:inherit;font-size:13px;padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:none;color:var(--foreground);cursor:pointer}
+.tb.on{background:var(--info);border-color:var(--info);color:#fff;font-weight:600}
+.tierline{font-size:12.5px;color:var(--muted-foreground);line-height:1.45}
+.road{display:flex;gap:6px}
+.st{flex:1;padding:9px 4px;border-radius:var(--radius);border:1px solid var(--border);font-size:13px;text-align:center;color:var(--foreground);cursor:pointer;background:none;font-family:inherit}
+.st small{display:block;font-size:11px;margin-top:2px;color:var(--muted-foreground)}
+.st.past{background:var(--accent-surface);color:var(--accent-surface-foreground);border-color:transparent}
+.st.sel{outline:2px solid var(--ring);outline-offset:2px;font-weight:600}
+.panel{border:1px solid var(--border);border-radius:var(--radius);padding:18px;display:grid;grid-template-columns:1.25fr 1fr;gap:18px}
+@media (max-width:820px){.panel{grid-template-columns:1fr}.road{flex-wrap:wrap}.st{min-width:30%}}
+.col{display:flex;flex-direction:column;gap:14px;min-width:0}
+.hd h2{margin:0;font-size:18px}
+.meta{font-size:12px;color:var(--muted-foreground)}
+.story{font-size:14px;line-height:1.5;margin:0}
+h4{margin:0 0 6px;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted-foreground)}
+ol.steps{margin:0;padding-left:0;list-style:none;counter-reset:s;display:flex;flex-direction:column;gap:7px}
+ol.steps li{counter-increment:s;display:grid;grid-template-columns:22px 62px 1fr;gap:8px;font-size:13px;line-height:1.45;align-items:start}
+ol.steps li::before{content:counter(s);width:20px;height:20px;border-radius:50%;background:var(--secondary);color:var(--secondary-foreground);font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:600}
+.who{font-size:10.5px;padding:2px 0;border-radius:999px;text-align:center;font-weight:600}
+.who.you{background:var(--warning);color:#000}.who.agent{background:var(--secondary);color:var(--secondary-foreground)}.who.rev{background:var(--info);color:#fff}.who.sa{background:#0d9488;color:#fff}
+.doc{border-top:1px solid var(--border);padding:6px 0;font-size:12.5px;line-height:1.4}
+.doc .f{font-family:var(--font-mono);font-size:12px;font-weight:600}
+.doc .d{color:var(--muted-foreground);margin-top:2px}
+.b{font-size:10px;padding:1px 6px;border-radius:999px;font-family:var(--font-sans);margin-left:4px}
+.b.new{background:var(--success);color:#fff}.b.upd{background:var(--secondary);color:var(--secondary-foreground)}.b.opt{border:1px solid var(--border);color:var(--muted-foreground)}
+.cl{list-style:none;margin:0;padding:12px 14px;font-family:var(--font-mono);font-size:12px;line-height:1.65;background:var(--card);color:var(--card-foreground);border-radius:var(--radius)}
+.cl .x{color:var(--success)}.cl .o{color:var(--muted-foreground)}.cl .now{color:var(--warning);font-weight:700}
+.cl .tag{font-family:var(--font-sans);font-size:10.5px;margin-left:6px;opacity:.85}
+.fm{font-family:var(--font-mono);font-size:12px;background:var(--code-background);padding:8px 12px;border-radius:var(--radius);line-height:1.6}
+.gate{font-size:13px;line-height:1.5;padding:12px 16px;border-radius:var(--radius);border:1px solid var(--warning)}
+.gate.none{border-color:var(--border);color:var(--muted-foreground)}
+code{font-family:var(--font-mono);font-size:12px;background:var(--code-background);padding:1px 4px;border-radius:4px}
+.nav{display:flex;justify-content:space-between;align-items:center}
+.btn{font-family:inherit;font-size:13px;padding:6px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--secondary);color:var(--secondary-foreground);cursor:pointer}
+.btn:disabled{opacity:.4;cursor:default}
+.hint{font-size:11px;color:var(--muted-foreground)}
+.legend{font-size:12px;color:var(--muted-foreground)}
+.sec{margin:6px 0 0;font-size:15px}
+.sumtop{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.keys{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:12px;color:var(--muted-foreground);align-items:center}
+.sum{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;table-layout:fixed}
+.sum th,.sum td{border-bottom:1px solid var(--border);border-right:1px solid var(--border);padding:8px 10px;vertical-align:top;text-align:left}
+.sum tr>*:first-child{border-left:1px solid var(--border)}
+.sum thead th{background:var(--secondary);color:var(--secondary-foreground);border-top:1px solid var(--border);font-size:13px}
+.sum thead th:first-child{width:130px}
+.sum tbody th{font-size:13px}
+.sum tbody th small{display:block;font-weight:400;color:var(--muted-foreground);font-size:11px;margin-top:2px}
+.sum td{cursor:pointer}
+.sum td:hover{background:var(--card)}
+.sum tfoot td,.sum tfoot th{background:var(--card);cursor:default;font-size:12px}
+.it{display:grid;grid-template-columns:60px 1fr;gap:6px;align-items:start;margin:3px 0;line-height:1.35}
+.k{font-size:10px;font-weight:700;text-align:center;padding:2px 0;border-radius:999px;letter-spacing:.02em}
+.k.hitl{background:var(--warning);color:#000}
+.k.qa{background:#7c3aed;color:#fff}
+.k.commit{background:var(--success);color:#fff}
+.k.rev{background:var(--info);color:#fff}
+.k.pr{background:#db2777;color:#fff}
+.k.step{background:var(--secondary);color:var(--secondary-foreground)}
+.k.cond{border:1px dashed var(--info);color:var(--info)}
+.k.push{border:1px solid #db2777;color:#db2777}
+.k.sa{background:#0d9488;color:#fff}
+.it.hitl>span:last-child,.it.qa>span:last-child{font-weight:600}
+.it.sub{margin-left:12px}
+.sumnote{font-size:12px;color:var(--muted-foreground);line-height:1.5}
+.walk{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}
+</style></head><body><div class="wrap">
+<div class="top"><h1>How a GSD item runs</h1></div>
+<div class="sumtop"><h2 class="sec">Summary - every stage by tier</h2></div>
+<div class="keys" id="keys"></div>
+<table class="sum" id="sum"></table>
+<div class="sumnote" id="sumnote"></div>
+<div class="walk"><h2 class="sec">Stage by stage</h2>
+ <div class="tiers">Tier <button class="tb tt" data-t="1">L1</button><button class="tb tt on" data-t="2">L2</button><button class="tb tt" data-t="3">L3</button></div></div>
+<div class="tierline" id="tierline"></div>
+<div class="legend">Four HITL Checkpoints on every tier: CP1 Kickoff, CP2 Pre-implementation, CP3 Review and, with an item branch, CP4 Merge. Teal steps run as stage agents (<code>gsd agents &lt;stage&gt;</code>), which a repository can replace, extend or add to.</div>
+<div class="road" id="road"></div>
+<div class="panel" id="panel"></div>
+<div class="nav"><button class="btn" id="prev">← Previous</button><span class="hint">Click a stage, switch the tier, or use ← → keys</span><button class="btn" id="next">Next →</button></div>
+</div>
+<script>
+const TIER={
+ 1:"<b>L1</b> - small, reversible, well tested. IDEA.md only (Goal, Success, Tests, TODO, Topology). Four checkpoints, like every tier.",
+ 2:"<b>L2</b> - visible to others or medium-sized. IDEA.md + PLAN.md + TODO.md; SPEC.md when the work needs it. Four checkpoints.",
+ 3:"<b>L3</b> - irreversible, critical path or large. IDEA.md + PLAN.md + SPEC.md + TODO.md. Full grilling inside Kickoff; PLAN, SPEC and TODO written and reviewed as one set. Four checkpoints, plus a smoke review if PLAN marks one."};
+const PAIR="the reviewer and model you chose at Kickoff - by default paired by model family: Codex with Sol for a non-OpenAI session, Claude Code with Opus for an OpenAI one";
+const W=(t,a,b,c)=>t==1?a:t==2?b:c;
+const S=[
+{n:"Ideation",sub:"what and how big",fm:"stage: ideation · delivery: proposed",
+ story:t=>"You describe the outcome. One short grilling round settles the outcome and how success is judged. Scout subagents look at the code and at overlapping work in parallel. The agent scores the tier, drafts IDEA.md and asks everything at CP1 Kickoff in one go. After approval the item gets its own branch from the base.",
+ steps:t=>[["agent","<b>Light grilling</b> - one short round on the outcome and how success is judged; skipped if your request already settles both"],
+  ["sa","<b>Scouts in parallel</b> - scout-codebase (what exists and where the change belongs"+(t>1?"; a dated research snapshot with file and line references":"")+"), scout-prs (open PRs and remote branches; skipped without gh or a remote) and scout-worktrees (worktrees, local branches, live GSD items). Agents from <code>~/.agents/rules/idea/</code> or the repo's <code>.agents/rules/idea/</code> join them; at most 4 run at once"],
+  ["sa","<b>Bug items only</b> - reproduce: a command that fails on your exact symptom, then 3-5 ranked hypotheses a test could disprove"],
+  ["agent","<b>Score the tier and draft IDEA.md</b> - Risk, Change and Confidence, one reason each"],
+  ["you","<b>CP1 Kickoff</b> - all at once, each with a recommended default: the tier; IDEA.md (approve for planning, change, or grill deeper"+(t==3?" - L3 runs its full grilling here":"")+"); the reviewer and model; compact or archive at close-out; overlap the scouts found; the stage-agent overrides in use (<code>gsd agents --all</code>)"],
+  ["agent","<b>Item branch</b> - <code>feature/&lt;name&gt;</code> from the base (<code>.gitkiss.jsonc</code>, else the default branch), never from what is checked out: <code>gk nf</code> when gk responds and a remote exists, else <code>git switch -c</code> from <code>origin/&lt;base&gt;</code>, or from the local base without a remote. Stops first if other writers' changes are uncommitted; recorded in IDEA.md <code>branches</code>"],
+  ["agent","<b>Commit the item records</b> on the item branch - the first item-scoped commit"]],
+ docs:t=>[["IDEA.md","new","Front matter, scope, completion boundary, <code>complexity: L"+t+"</code>, <code>branches</code> (item branch, then the base), Complexity section, Lifecycle checklist"],
+  ["DECISIONS.md","new","Tier, \"approved IDEA.md vN for planning\" and the other Kickoff answers"],["FACTS.md","opt","Scout findings and overlap; bug reproduction command and observed failure"],
+  ...(t>1?[["research/&lt;date&gt;-snapshot.md","new","How the code works today, with file:line references"]]:[])],
+ gate:t=>"<b>CP1 Kickoff.</b> One sitting: tier, IDEA, reviewer, compact or archive, overlap and overrides; \"go\" accepts every default. A change or deeper grilling loops back to the IDEA draft and asks again. No planning document is written before approval. Approval also covers the item branch."},
+{n:"Planning",sub:"full set, agent review, CP2",fm:"stage: planning · delivery: proposed → ready",
+ story:t=>"From Kickoff to CP2 the agent works without stopping. It writes "+W(t,"the rest of IDEA.md","PLAN.md and TODO.md","PLAN.md, SPEC.md and TODO.md as one set")+", settles the two-way-door choices, proposes the topology and the verification plan, commits the set and runs the cross-agent plan review, one commit per round. CP2 then asks you everything at once.",
+ steps:t=>[W(t,["agent","<b>Complete IDEA.md</b> - Goal, Success (AC-NN), Tests (one automated test per AC), TODO (T-NN) and Topology"],
+   ["agent","<b>PLAN.md</b> - context and flow diagrams (entry → execution → exit), acceptance criteria, Verification, Topology; Program design (usage before shape) for interface changes; Sequence as vertical slices. <b>TODO.md</b> linked to criteria; SPEC.md when the work needs it"],
+   ["agent","<b>PLAN.md</b> - Program design, context, flow, layer and failure/rollback diagrams, Verification, Topology, vertical slices. <b>SPEC.md</b> (criteria with stable IDs, edge cases, completion boundary, test seams) and <b>TODO.md</b>"]),
+  ...(t>1?[["agent","<b>Fit and operation</b> - project patterns, likely next change, failure modes, logs and metrics, rollback signal"]]:[]),
+  ["agent","<b>Two-way-door choices</b> - decided and listed with a reason, not asked; one-way doors stay open for CP2"],
+  ["agent","<b>Topology</b> - orchestrator, implementer subagents with provider and model, reviewers. Default: one implementer subagent on the same provider and model"],
+  ["agent","<b>Verification plan</b> - which of the five layers each criterion needs"],
+  ["agent","<b>Commit the planning set</b>, before the review"],
+  ["rev","<b>plan-reviewer</b> - cross-agent review of the whole set through review-loop-engine, with "+PAIR+". No scope stop: Kickoff set the scope. Findings are verified and folded in, one commit per round. Skipped only on your explicit waiver"],
+  ["you","<b>CP2 Pre-implementation</b> - approve "+W(t,"the reviewed IDEA.md","PLAN.md and TODO.md","PLAN.md, SPEC.md and TODO.md")+" with the topology and the verification plan. Shown with them: one-way doors, findings still disputed, the choices the agent settled. You can change any of them, or opt out of the commits"],
+  ["agent","<b>Commit the CP2 decisions</b> and any changes you asked for"]],
+ docs:t=>[["IDEA.md","upd",t==1?"Goal, Success, Tests, TODO and Topology sections; Lifecycle ticks":"Lifecycle ticks, next_action"],
+  ...(t>1?[["PLAN.md","new","Diagrams, Acceptance, Verification, Topology, Program design, Sequence, Fit and operation, settled two-way-door choices"],["TODO.md","new","T-NN tasks linked to AC-NN"]]:[]),
+  ...(t==2?[["SPEC.md","opt","Only when the work needs it"]]:[]),...(t==3?[["SPEC.md","new","Observable criteria, edge cases, completion boundary"]]:[]),
+  ["REVIEW.md","new","Plan-review findings, their verification and disposition, or the waiver"],["DECISIONS.md","upd","Review run (reviewer, model, rounds) or your waiver; your CP2 approval and topology"]],
+ gate:t=>"<b>CP2 Pre-implementation.</b> Not asked while the plan review is pending. Approval covers the set, the topology and the verification plan, and authorises the item-scoped commits through to CP3, the counter-review, the item-branch pushes and the draft PR, the CI fix commits and their pushes, unless you opt out. A change revises the documents, reruns the review on them and asks CP2 again."},
+{n:"Execution",sub:"build and check",fm:"stage: execution · delivery: in_progress → implemented",
+ story:t=>"The implementer subagent the topology names builds the approved slices with their tests. This session orchestrates: it checks the returned work, fixes in-scope failures and stays the only writer of GSD records and the only one who commits, all on the item branch. New questions wait for CP3 unless no approved work can continue.",
+ steps:t=>[["sa","<b>implementer</b> - builds the TODO slices in order, each with its tests. Parallel implementers only when the topology says so, each in its own worktree"],
+  ["agent","<b>Check the work</b> - run each criterion's automated test; fix in-scope failures before reporting"],
+  ["agent","<b>Challenge a failing premise</b> - when two fixes built on one premise fail the same check, write the premise down and test it before a third fix"],
+  ...(t==3?[["you","<b>Smoke review</b>, if PLAN marks a slice - the agent commits it and stops for your early review; a change to the plan reopens its approval"]]:[]),
+  ["agent","<b>Checkpoint commit</b> of the item's own paths, then the <b>door map</b> - each changed path one-way (migrations, deletions, auth, secrets, deploy scripts, payments, sent messages, public API removals) or two-way; unclear counts as one-way"],
+  ["sa","<b>simplifier</b> - code-simplification on the changed code; a characterisation check first where none covers it; an unhelpful simplification is reverted; committed if it changed code"]],
+ docs:t=>[["Code + tests","upd","The approved change"],[t==1?"IDEA.md (TODO)":"TODO.md","upd","Task ticks"],
+  ["FACTS.md","upd","Criterion test results; premises tested"],["research/","opt","The door map"],
+  ["DECISIONS.md","opt","Reverted simplifications; scope changes"]],
+ gate:t=>t==3?"<b>Smoke review, if PLAN marks a slice</b> - the one extra stop. Otherwise CP2 covers execution, and a material scope change reopens the affected approval.":"No stop - CP2 covers execution. A material scope change reopens the affected approval.",gateNone:t=>t!=3},
+{n:"Review",sub:"second opinion, PR, CP3, CI, CP4",fm:"stage: review · delivery: implemented → verified (until the merge)",
+ story:t=>"The code is already committed. A cross-agent counter-review runs on it, each round's fixes their own commit; a separate security review follows when the security gate applies. The verification agent runs the planned layers, the docs agent folds the lasting docs and evidence in, the retro turns review lessons into project review rules, and the checks rerun on the final commit. The pull-request agent pushes the item branch and opens a draft PR with the review package, and CP3 asks you to review it there. After your approval the agent writes FINAL.md, rebases, pushes (a leased force push only if the rebase rewrote pushed commits), readies the PR and gets CI green. CP4 then asks to merge. The item stays at review until the merge.",
+ steps:t=>[["rev","<b>counter-reviewer</b> - runs by default with "+PAIR+", without a scope stop; if it cannot run it is recorded as waived - never a gate"],
+  ["agent","<b>Verify each finding</b> - the round's door map first, then a fresh verifier per finding against the reviewed commit (three for an L3 one-way door): confirmed, refuted or unverifiable. Filters drop hypothetical concerns and preferences, then repeats, settled findings and nitpicks over the cap when every verifier agrees on the fingerprint - never security, migration, idempotency or concurrency"],
+  ["agent","<b>Fix confirmed findings</b> - rerun the checks; one commit per round. The reviewer stays read-only"],
+  ["sa","<b>security-reviewer</b>, only when <code>gsd risk --base &lt;item base&gt; --changed</code> reports an <code>always_high</code> match - a separate loop with the security lens only, up to 3 rounds. The gate stays on once recorded; an open security finding blocks FINAL.md and delivery until a fix a fresh verifier confirms, or your quoted acceptance in DECISIONS.md, releases it"],
+  ["sa","<b>verification</b> - classifies the changed paths, then runs the planned layers in order and stops at the first failure: 1. tests and specs"+(t>1?" (each criterion's test fails on the base commit and passes on the final one; a mutation check stands in when the base run is unavailable)":"")+"; 2. code checks; 3. a run with mock data; 4. a benchmark when performance-sensitive; 5. a UI walkthrough of each changed flow through its options and states, with screenshots saved to <code>docs/features/&lt;feature&gt;/</code>. A layer the diff implies but the plan omits runs by default, recorded \"added by the diff\"; an unavailable method is not_run or blocked, never passed"],
+  ["sa","<b>docs</b> - documentation fold-back: feature docs, links to the final screenshots and the benchmark table (<code>docs/features/&lt;feature&gt;/</code> unless the project keeps them elsewhere), conditional rules, short AGENTS.md links; committed"],
+  ["sa","<b>retro</b> - beside docs, at most 5 changes to the project review rules and rubrics in <code>.agents/rules/review/</code>, each citing its findings; creates the rules only on your Kickoff yes. In the same fold-back commit; when it changed anything, one review round on its changes and a gate re-check follow"],
+  ["agent","<b>Accepted deferrals</b> moved to <code>.agents/TODO.md</code> with a source link - never to dodge an unfinished criterion"],
+  ["agent","<b>Final checks</b> - rerun every acceptance check on the final commit"],
+  ["agent","<b>Review package</b> - Changed, Door and blast radius, Safe because (proof level 1-5), How tested, How to undo, Evidence by type, Review, Residual risk, Offered. One-way-door files linked; a line-by-line read offered, never a gate. Shown in the reply and written as the PR body from the PR template"],
+  ["sa","<b>pull-request</b> - pushes the item branch by explicit refspec (<code>git push origin refs/heads/&lt;branch&gt;:refs/heads/&lt;branch&gt;</code>, checked against IDEA.md) and opens a draft PR against the base with <code>gh pr create</code> and the package, on the gk path too (never <code>gk pf</code> or <code>gk pr</code>), or updates an existing PR's body. Without a remote or gh it pushes nothing; the body is saved as <code>research/&lt;date&gt;-pr.md</code> and the skip is named"],
+  ["you","<b>CP3 Review</b> - the package, linked to the draft PR: approve or give feedback; staging QA, only when <code>~/.agents/rules/deploy/staging.md</code> or the repo's deploy docs describe one, naming every branch it pushes; OK to rebase and force push with lease after approval. Feedback is fixed, committed, the checks rerun, pushed and the PR body rewritten, then CP3 is asked again. Acceptance covers that commit only"],
+  ["agent","<b>FINAL.md with Delivery</b> (PR link, CI attempts, CP4 outcome <code>pending</code>) and the <b>close-out commit</b>; IDEA.md stays at review/verified with no completion date"],
+  ["agent","<b>Rebase on the base</b> (<code>gk rf</code> or <code>git rebase origin/&lt;base&gt;</code>), then <b>push</b> the item branch - a plain push when its fetched remote head is an ancestor, a <b>force push with lease</b> bound to the item branch and that head only when it is the agent's own last push, else a stop; never <code>--force</code>, the base or another branch. Then <code>gh pr ready</code>"],
+  ["sa","<b>ci</b> - reports the ready PR's head: green, red with the failing check and an excerpt, pending, blocked or no CI. Reads only. On red the agent fixes, commits and pushes, at most 3 attempts, then asks you. Missing checks are never green; no CI is skipped and named"],
+  ["agent","<b>Base-moved check</b> - fetch the base; if it moved since CI passed, rebase, rerun the checks, force push with lease and run CI again"],
+  ["you","<b>CP4 Merge</b> - what changed since CP3 (CI fixes, rebases) and the new head, the CI result or \"no CI\", and a reminder when the PR has no approving review. Yes accepts that head and merges it; no ends delivery declined, open at review"],
+  ["agent","<b>Permission hook denies a push?</b> - in Codex, for example: stop, print the exact command for you to run, try no other way round, then check the remote ref after you confirm"]],
+ docs:t=>[["REVIEW.md","upd","Findings with Door, Verified, Verifier and Method; the package"],["research/verification/","opt","One JSON reply per verifier, per review round"],
+  ["FACTS.md","upd","Each verification layer by name - method, environment, steps, result; final checks on the final commit; the PR link or the skip"],["research/","opt","Recordings, intermediate screenshots, raw benchmark runs; the PR body when there is no remote or gh"],
+  ["docs/features/&lt;feature&gt;/","upd","Behaviour, usage, limits; the final screenshots and benchmark table"],["AGENTS.md","opt","Short conditional routing links only"],
+  [".agents/rules/review/","opt","Project review rules and rubrics changed by the retro"],[".agents/TODO.md","opt","Accepted deferrals with a source link"],["FINAL.md","new","After CP3: outcome, acceptance and commit, Delivery section with CP4 outcome pending"],["IDEA.md","upd","review/verified, next_action names the delivery step"],["DECISIONS.md","upd","Counter-review run or waiver; your CP3 acceptance; your CP4 answer"]],
+ gate:t=>"<b>CP3 Review, on every tier.</b> You accept the package for one commit. \"Close it\", \"checks passed\" or accepting a deferral is not acceptance; a later revision needs it again. <b>CP4 Merge</b>, after CI is green or skipped, re-accepts whatever changed since CP3. Neither authorises deployment. A declined or blocked delivery stays open at review/verified, with next_action saying what would resume it."},
+{n:"Complete",sub:"merge, records, compact",fm:"stage: complete · delivery: verified · completed: &lt;date&gt;",
+ story:t=>"CP4's yes carries straight on: the agent checks the head is the one CI passed, merges with a merge commit, then commits and pushes two records-only commits to the base - the delivery outcome, then the compaction or archive chosen at Kickoff. The item drops out of gsd next.",
+ steps:t=>[["agent","<b>Check the CP4 conditions</b> - your yes recorded, the item branch head is the head CI passed, <code>origin/&lt;base&gt;</code> is the commit just fetched; otherwise stop and say which"],
+  ["agent","<b>Merge</b> - without a remote, a local <code>--no-ff</code> merge with no push; else <code>gk ff</code> (never <code>gk ff!</code>), or plain git: pull the base, rebase, <code>git merge --no-ff</code>. The local base must be the fetched base. Never squash, fast-forward or rebase-merge; never with red or pending CI. Check the merge's parents are the fetched base and the tested head, push the base by explicit refspec, then check the remote base is the merge commit"],
+  ["agent","<b>Delivery outcome commit</b> on the base - FINAL.md's Delivery (<code>merged at &lt;sha&gt; on &lt;date&gt;</code>), FACTS.md, IDEA.md complete/verified with the date; pushed and checked with <code>git ls-remote</code>"],
+  ["agent","<b>Compact or archive commit</b> on the base, as chosen at Kickoff - <code>gsd compact</code> or <code>gsd prune</code>, each run with <code>--dry</code> first; records only, pushed the same way"],
+  ["agent","<b>Delete the item branch</b> - remote, checked with <code>git ls-remote</code>, then local, on every merge path. If the hook denies the delete, the records are already on the base: the agent prints the command for you to run"],
+  ["you","<b>Authorise deployment</b> separately, if the completion boundary includes it"],["agent","<b>Meet the completion boundary</b> - for example a deployed-session check, recorded in FACTS.md"]],
+ docs:t=>[["FINAL.md","upd","Delivery: CI attempts, merged at the merge commit on the date"],["IDEA.md","upd","complete/verified, completion date, Lifecycle fully ticked"],["FACTS.md","upd","Pushed heads, CI results; deployed-session evidence if any"],["docs/gsd/YYYY/MM/","new","After the delivery outcome commit: a one-file summary, or the full folder"]],
+ gate:t=>"No new stop - CP4's yes covers the merge, the base push, the two records-only commits and then deleting the item branch. <b>Deployment needs its own yes.</b> Later, <code>gsd reopen</code> brings the item back and clears commit-bound ticks."}];
+const TRACK={0:t=>["Light grilling (or already settled)","Scouting","CP1 Kickoff ★"],
+ 1:t=>W(t,["IDEA goal, criteria, tests, tasks and topology","Planning set committed","Pre-implementation review, each round committed","CP2 approval of IDEA.md ★"],
+   ["PLAN with diagrams, acceptance, topology and verification plan","TODO","Planning set committed","Pre-implementation review, each round committed","CP2 approval of PLAN and TODO ★"],
+   ["PLAN with diagrams, topology and verification plan","SPEC and TODO","Planning set committed","Pre-implementation review, each round committed","CP2 approval of PLAN, SPEC and TODO ★"]),
+ 2:t=>["Implement through the approved topology"+(t==3?" (smoke review if marked)":""),"Run criterion checks","Checkpoint committed","Simplification committed"],
+ 3:t=>["Counter-review, each round's fixes committed","Security review, when the gate applies","Verification layers recorded","Documentation fold-back and retro committed","Retro review, if the retro changed anything","Accepted deferrals recorded","Final checks on final commit","Draft PR opened","CP3 review package accepted ★","FINAL written with Delivery, close-out committed","Rebased, force pushed, PR ready","CI green or skipped","CP4 Merge accepted ★"],
+ 4:t=>["Merged into the base","Delivery outcome committed and pushed"]};
+let cur=0,tier=2;
+const $=id=>document.getElementById(id),F=(v)=>typeof v=="function"?v(tier):v;
+function tracker(){
+ let h="";
+ S.forEach((s,i)=>{
+  if(i<cur)h+=`<li class="x">- [x] ${s.n}<span class="tag">all ${TRACK[i](tier).length} sub-tasks ticked</span></li>`;
+  else if(i==cur){h+=`<li class="${cur==4?'now':'o'}">- [${cur==4?'x':' '}] ${s.n}${cur==4?'<span class="tag">ticked at close</span>':''}</li>`;
+   TRACK[i](tier).forEach(x=>h+=`<li class="now">&nbsp;&nbsp;- [ ] ${x}<span class="tag">→ ticked this stage</span></li>`)}
+  else h+=`<li class="o">- [ ] ${s.n}</li>`;
+ });
+ return h;
+}
+const WHO={you:"You",rev:"Reviewer",sa:"Subagent",agent:"Agent"};
+function draw(){
+ document.querySelectorAll('.tt').forEach(b=>b.classList.toggle('on',+b.dataset.t==tier));
+ $('tierline').innerHTML=TIER[tier];
+ $('road').innerHTML=S.map((x,i)=>`<button class="st${i<cur?' past':''}${i==cur?' sel':''}" data-i="${i}">${i+1}. ${x.n}<small>${x.sub}</small></button>`).join('');
+ const s=S[cur];
+ const steps=F(s.steps).map(([w,t])=>`<li><span class="who ${w}">${WHO[w]}</span><span>${t}</span></li>`).join('');
+ const docs=F(s.docs).map(([f,k,d])=>`<div class="doc"><span class="f">${f}</span><span class="b ${k}">${k=='new'?'created':k=='upd'?'updated':'if needed'}</span><div class="d">${d}</div></div>`).join('');
+ const gn=F(s.gateNone);
+ $('panel').innerHTML=`<div class="col">
+   <div class="hd"><h2>${cur+1}. ${s.n}</h2><div class="meta">IDEA.md front matter: <code>${s.fm}</code></div></div>
+   <p class="story">${F(s.story)}</p>
+   <div><h4>What happens, in order</h4><ol class="steps">${steps}</ol></div>
+   <div class="gate${gn?' none':''}">${gn?'':'<b>⛳ Checkpoint - </b>'}${F(s.gate)}</div>
+  </div><div class="col">
+   <div><h4>Documents updated</h4><div>${docs}</div></div>
+   <div><h4>Main tracker - IDEA.md Lifecycle</h4><ul class="cl">${tracker()}</ul><div class="meta" style="margin-top:6px">★ = your approval. Earlier stages are collapsed here but fully ticked in the file; a stage box is ticked only when every sub-task is done and the item moves on.</div></div>
+   <div class="fm">$ gsd next → ${TRACK[cur](tier)[0]}</div>
+  </div>`;
+ $('prev').disabled=cur==0;$('next').disabled=cur==S.length-1;
+}
+$('road').onclick=e=>{const b=e.target.closest('.st');if(b){cur=+b.dataset.i;draw()}};
+document.querySelector('.walk .tiers').onclick=e=>{const b=e.target.closest('.tt');if(b){tier=+b.dataset.t;draw()}};
+$('prev').onclick=()=>{if(cur>0){cur--;draw()}};
+$('next').onclick=()=>{if(cur<S.length-1){cur++;draw()}};
+document.addEventListener('keydown',e=>{if(e.key=='ArrowLeft'&&cur>0){cur--;draw()}if(e.key=='ArrowRight'&&cur<S.length-1){cur++;draw()}});
+
+const KEYS={hitl:"HITL",qa:"Q&amp;A",commit:"Commit",rev:"Review",pr:"PR",push:"Push",sa:"Subagent",step:"Step",cond:"If needed"};
+const KEYDESC={hitl:"HITL Checkpoint - you approve or choose",qa:"grilling or a checkpoint question",commit:"agent commits item paths",rev:"cross-agent review",pr:"pull request body",push:"push or PR action",sa:"subagent does the work",step:"agent step, no stop",cond:"stops only on a condition"};
+const by=f=>({1:f(1),2:f(2),3:f(3)});
+const LAYERS=[["step","1. Tests and specs: every criterion and edge case; gaps go back to the implementer",1],["step","2. Code checks: the project's lint, type and static checks",1],["step","3. Run with mock data: fixture or created data, edge cases",1],["cond","4. Performance-sensitive: benchmark before and after, or A/B, with batch seed data",1],["cond","5. UI: walk each changed flow through its options and states in the in-app browser or Chrome, screenshots to docs/features/",1],["cond","A layer the diff implies but the plan omits runs by default, recorded \"added by the diff\"",1]];
+const SUM=[
+ by(t=>[["qa","Light grilling: outcome and how success is judged"],["sa","scout-codebase"+(t>1?" + dated research snapshot":"")],["sa","scout-prs and scout-worktrees, in parallel"],["cond","Repo or ~/.agents/rules stage agents join; at most 4 at a time"],["sa","Bug items: reproduce - failing repro, 3-5 hypotheses"],["step","Score tier, draft IDEA"],
+  ["hitl","CP1 Kickoff: tier, IDEA, reviewer, compact or archive, overlap, overrides"],...(t==3?[["qa","Full grilling: design rounds",1]]:[]),["qa","IDEA: approve, change, or grill deeper",1],["step","Item branch from the base: gk nf, plain git, or local without a remote"],["commit","Item records, on the item branch"]]),
+ by(t=>[["step",W(t,"Complete IDEA: Goal, Success, Tests, TODO, Topology","PLAN (diagrams, acceptance, fit and operation, topology) + TODO; SPEC if needed","PLAN + SPEC + TODO as one set")],["step","Two-way-door choices decided and listed"],["step","Topology and verification plan"],["commit","Planning set, before review"],["rev","plan-reviewer: no scope stop; findings verified and folded in"],["commit","One commit per review round"],
+  ["hitl","CP2 Pre-implementation: approve "+W(t,"IDEA","PLAN + TODO","PLAN + SPEC + TODO")+" + topology + verification plan"],["qa","One-way doors, disputed findings, settled choices",1],["commit","CP2 decisions"]]),
+ by(t=>[["sa","implementer: "+(t==1?"one subagent, same provider and model":"per the approved topology - one by default")],["step","Check the work: criterion tests; fix in-scope failures"],...(t==3?[["commit","Smoke slice"],["cond","Smoke review, if PLAN marks one"]]:[]),["commit","Checkpoint"],["step","Door map"],["sa","simplifier"],["commit","Simplification, if it changed code"]]),
+ by(t=>[["rev","counter-reviewer; findings verified"],["commit","One commit per review round"],["cond","security-reviewer: only when the security gate applies; one commit per round"],["sa","verification: classify paths, then the planned layers in order"],...LAYERS,["sa","docs: fold-back of docs, screenshots and benchmark table"],["sa","retro: review lessons into project review rules"],["commit","Fold-back"],["cond","Retro review round and gate re-check, if the retro changed anything"],["step","Final checks on the final commit"],["push","pull-request: push the item branch by explicit refspec, open a draft PR with the review package; skipped without a remote or gh"],
+  ["hitl","CP3 Review: the package in the draft PR"],["qa","Approve, or give feedback - fixed, committed, pushed, PR body rewritten, asked again",1],["qa","Staging QA? Only when a staging procedure exists",1],["qa","After approval: rebase and force push with lease?",1],
+  ["commit","FINAL.md with Delivery; close-out"],["push","Rebase, push (leased force only if rewritten; item branch only), PR ready"],["sa","ci: report the head - green, red, pending, blocked or no CI"],["commit","Red: fix, commit, push; at most 3 attempts",1],["cond","Ask you if CI is still red after 3, or blocked",1],["cond","Base moved: rebase, checks, force push, CI again"],
+  ["hitl","CP4 Merge: changes since CP3, the new head, CI result"],["qa","Accept the head and merge? Reminder if no approving review",1]]),
+ by(t=>[["push","Merge: local without a remote, else gk ff or plain git --no-ff; check its parents, push the base"],["commit","Delivery outcome, on the base"],["commit","Compact or archive, as chosen at Kickoff, on the base"],["cond","Authorise deployment, if in the boundary"]])
+];
+const TOT={hitl:[1,2,3].map(t=>"Light grilling + 4 checkpoints (Kickoff, Pre-implementation, Review, Merge)"+(t==3?" + optional smoke":""))};
+const NOTE="Commits hold only the item's own paths, on the item branch. Every push names the remote and one refspec checked against IDEA.md <code>branches</code>; the only force push is the item branch with a lease after CP3, and the base is pushed only for the CP4 merge and its two records-only commits. Without a remote the merge is local and nothing is pushed; without CI the CI step is skipped and named. If the permission hook denies a push, the agent prints the exact command for you to run. Every checkpoint question carries a recommended default, so \"go\" accepts them all, and every summary ends with <b>Next:</b>. <b>Launching subagents:</b> inside T3 Code, as T3 child tasks; outside it, the harness's own subagent tool for the session's provider and model, and the claude-code, codex or pi skill for another provider. At most 4 run at a time in a stage. Click a cell to open that stage below.";
+function drawSum(){
+ document.getElementById('keys').innerHTML=Object.keys(KEYS).map(k=>`<span><span class="k ${k}" style="display:inline-block;width:60px">${KEYS[k]}</span> ${KEYDESC[k]}</span>`).join('');
+ const cell=(items)=>items.map(([k,x,sub])=>`<div class="it ${k}${sub?' sub':''}"><span class="k ${k}">${KEYS[k]}</span><span>${x}</span></div>`).join('');
+ let h=`<thead><tr><th>Stage</th>${[1,2,3].map(t=>`<th>L${t}</th>`).join('')}</tr></thead><tbody>`;
+ S.forEach((s,i)=>{h+=`<tr><th>${i+1}. ${s.n}<small>${s.sub}</small></th>${[1,2,3].map(t=>`<td data-s="${i}" data-t="${t}">${cell(SUM[i][t])}</td>`).join('')}</tr>`});
+ const commits=t=>SUM.flatMap(s=>s[t]).filter(([k])=>k=="commit").length+" commit points; each review round is its own commit";
+ const prline="Draft PR before CP3, ready after it; merged and pushed to the base on your yes at CP4";
+ h+=`</tbody><tfoot><tr><th>Totals</th>${[0,1,2].map(i=>`<td><div class="it hitl"><span class="k hitl">HITL</span><span>${TOT.hitl[i]}</span></div><div class="it commit"><span class="k commit">Commit</span><span>${commits(i+1)}</span></div><div class="it pr"><span class="k pr">PR</span><span>${prline}</span></div></td>`).join('')}</tr></tfoot>`;
+ document.getElementById('sum').innerHTML=h;
+ document.getElementById('sumnote').innerHTML=NOTE;
+}
+document.getElementById('sum').onclick=e=>{const c=e.target.closest('td[data-s]');if(c){cur=+c.dataset.s;tier=+c.dataset.t;draw();document.querySelector('.walk').scrollIntoView({behavior:'smooth'})}};
+const q=new URLSearchParams(location.search);if(q.get('s'))cur=+q.get('s');if(q.get('t'))tier=+q.get('t');
+drawSum();draw();
+</script></body></html>

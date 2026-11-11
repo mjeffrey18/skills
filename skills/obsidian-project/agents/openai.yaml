@@ -1,0 +1,5 @@
+interface:
+  display_name: "Obsidian Project"
+  short_description: "Create and maintain Obsidian projects over time"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GSD - stage agents</title>
+<!-- Map of skills/gsd/references/<stage>/<agent>.md definitions (gsd agents --all lists them).
+     Source of truth: skills/gsd/references/specialists.md, Stage agents, and workflow.md for the delivery steps. -->
+<style>
+:root{--background:#0f1115;--foreground:#e6e8ec;--muted-foreground:#9aa1ad;--secondary:#22262e;--secondary-foreground:#e6e8ec;
+--border:#30353f;--card:#181b21;--success:#16a34a;--warning:#f59e0b;--info:#3b82f6;--radius:8px;
+--font-sans:system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:light){:root{--background:#fff;--foreground:#1a1d23;--muted-foreground:#5f6672;--secondary:#f1f3f6;
+--secondary-foreground:#1a1d23;--border:#d9dde3;--card:#f6f7f9}}
+html{background:var(--background)}
+body{font-family:var(--font-sans);color:var(--foreground);margin:0}
+@media (min-width:900px){body{padding:24px 28px}}
+h1{margin:0;font-size:18px}
+.sub{font-size:12.5px;color:var(--muted-foreground);margin:4px 0 14px;line-height:1.45}
+.stage{display:grid;grid-template-columns:150px 1fr;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;overflow:hidden}
+.sh{background:var(--card);padding:12px;border-right:1px solid var(--border)}
+.sh b{font-size:14px;display:block}
+.sh code{font-size:11.5px}
+.sh .orch{font-size:11.5px;color:var(--muted-foreground);margin-top:8px;line-height:1.45}
+.sh .orch b{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:2px;color:var(--foreground)}
+.agents{padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;align-content:start}
+.ag{border:1px solid #0d9488;border-radius:var(--radius);padding:9px 11px;font-size:12px;line-height:1.45;display:flex;flex-direction:column;gap:4px}
+.ag.opt{border-style:dashed}
+.ag .f{font-family:var(--font-mono);font-size:12px;font-weight:700;color:#14b8a6}
+.ag .row{color:var(--muted-foreground)}
+.ag .row b{color:var(--foreground);font-weight:600}
+.tags{display:flex;flex-wrap:wrap;gap:4px}
+.t{font-size:10px;font-weight:600;padding:1px 7px;border-radius:999px;background:var(--secondary);color:var(--secondary-foreground)}
+.t.par{background:#0d9488;color:#fff}.t.seq{background:var(--info);color:#fff}.t.skill{border:1px solid var(--border);background:none}
+.cp{display:flex;align-items:center;gap:8px;margin:2px 0 10px 150px;font-size:12px;color:var(--muted-foreground)}
+.cp>span:first-child{background:var(--warning);color:#000;font-weight:700;font-size:10.5px;padding:2px 8px;border-radius:999px}
+.box{border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:12.5px;line-height:1.5;margin-top:12px}
+.box code{font-family:var(--font-mono);font-size:11.5px;background:var(--secondary);padding:1px 4px;border-radius:4px}
+.box table{border-collapse:collapse;width:100%;margin-top:6px}
+.box td,.box th{text-align:left;padding:5px 10px 5px 0;border-top:1px solid var(--border);font-size:12px;vertical-align:top}
+.box th{color:var(--muted-foreground);font-weight:600}
+@media (max-width:700px){.stage{grid-template-columns:1fr}.sh{border-right:none;border-bottom:1px solid var(--border)}.cp{margin-left:0}}
+</style></head><body>
+<h1>GSD - stage agents</h1>
+<p class="sub">Every file under <code>skills/gsd/references/&lt;stage&gt;/</code>, resolved with <code>gsd agents &lt;stage&gt;</code>. Each card is a subagent in the skill; a dashed card runs only when its condition applies. The left column is what the main agent keeps. At most 4 subagents run at a time in any stage.</p>
+<div id="map"></div>
+<div class="box"><b>Overrides.</b> After the skill, the agent checks <code>~/.agents/rules/&lt;stage&gt;/</code>, then the repo's <code>.agents/rules/&lt;stage&gt;/</code>; the repo wins. CP1 Kickoff lists every override in use, from <code>gsd agents --all</code>. Files without <code>mode</code> are not agents, so review-critic's repo lenses and the project review rules (<code>REVIEW.md</code>) can share <code>.agents/rules/review/</code>.
+<table><tr><th>File</th><th>Effect</th><th>Front matter</th></tr>
+<tr><td><code>review/verification.md</code></td><td>Same name - replaces the skill's agent</td><td><code>mode: replace</code></td></tr>
+<tr><td><code>review/verification_1.md</code></td><td>Name plus <code>_N</code> - appended to that agent, in number order</td><td><code>name: verification</code> (the base agent's name - <code>gsd agents</code> rejects any other), <code>mode: append</code>, <code>extends: verification</code></td></tr>
+<tr><td><code>review/migrations.md</code></td><td>New name - an extra subagent in that stage, in parallel</td><td><code>mode: new</code></td></tr></table></div>
+<div class="box"><b>Front matter.</b> <code>name</code>, <code>description</code>, <code>mode</code>, and <code>extends</code> for appends. The folder gives the stage. Permissions come from the harness. Models and providers come from the topology approved at CP2. Inside T3 Code, subagents launch as T3 child tasks. Outside it, a subagent on the session's own provider and model uses the harness's own subagent tool (Claude Code's Agent tool, Codex's spawn_agent); another provider goes through the claude-code, codex or pi skill.</div>
+<script>
+const S=[
+ {d:"idea",n:"1. Ideation",orch:"Light grilling, tier score, IDEA draft; after Kickoff, the item branch from the base (gk, plain git, or local without a remote), then the item records commit",cp:["CP1 Kickoff","tier, IDEA (approve, change, grill deeper), overlap, overrides"],a:[
+  ["scout-codebase","What exists, where the change belongs, what it touches","FACTS.md; L2/L3 dated research snapshot","par","All tiers"],
+  ["scout-prs","Open PRs and remote branches that overlap the request; skipped and reported without gh or a remote","Overlap list in FACTS.md","par","All tiers"],
+  ["scout-worktrees","Worktrees, local branches and live GSD items","Overlap list in FACTS.md","par","All tiers"],
+  ["reproduce","Failing reproduction command and 3-5 hypotheses","FACTS.md","par","Bug items only",0,1]]},
+ {d:"plan",n:"2. Planning",orch:"Grilling rounds, PLAN / SPEC / TODO, two-way-door choices, topology; commits the plan before review, each review round, then CP2 decisions",cp:["CP2 Pre-implementation","plan, topology, one-way doors, disputed findings"],a:[
+  ["plan-reviewer","Cross-agent review of the committed planning set before CP2; scope from Kickoff; findings verified; up to 3 rounds","REVIEW.md","seq","All tiers","review-loop-engine, review-critic"]]},
+ {d:"build",n:"3. Execution",orch:"Checks the work, runs the tests itself, fixes in-scope failures, checkpoint and simplification commits",a:[
+  ["implementer","Builds the TODO slices; one by default on the same provider and model; parallel slices only per the CP2 topology, each in its own worktree","Code and tests on the item branch","seq","All tiers"],
+  ["simplifier","Behaviour-preserving clean-up after the checkpoint","Simplification diff","seq","All tiers","code-simplification"]]},
+ {d:"review",n:"4. Review",orch:"Code is already committed; applies verified fixes and commits each review round, then fold-back and final checks",cp:["CP3 Review","review package on the draft PR, feedback loop (fix, commit, push, PR body, ask again), staging QA when a staging procedure exists, OK to rebase and force push with lease"],a:[
+  ["counter-reviewer","Cross-agent review of the committed code before you see it; findings verified; up to 3 rounds","REVIEW.md","seq","All tiers","review-loop-engine, review-critic"],
+  ["security-reviewer","Separate review loop with the security lens only, after the counter-review, when <code>gsd risk --base &lt;item base&gt; --changed</code> reports an <code>always_high</code> match; own session and brief, up to 3 rounds. An open security finding blocks close-out until a verified fix or your quoted acceptance releases it","REVIEW.md, under its own heading","seq","Security gate only","review-loop-engine, review-critic",1],
+  ["verification","Classifies the changed paths, then runs the planned layers in order and stops at the first failure: 1. tests and specs cover every criterion and edge case; 2. code checks - the project's lint, type and static checks; 3. run the change with mock data and check results; 4. if performance-sensitive, benchmark before and after or A/B with batch seed data; 5. if UI, walk each changed flow through its options and states in the in-app browser or Chrome, with screenshots. The CP2 plan says which layers each criterion needs; for a tiered item a layer the diff implies but the plan omits runs by default, recorded \"added by the diff\". A repo replaces or extends it with <code>.agents/rules/review/verification.md</code> or <code>verification_N.md</code>. Does not edit code","Each layer in FACTS.md; final screenshots in docs/features/&lt;feature&gt;/; raw runs under research/","seq","All tiers"],
+  ["pull-request","After the final checks: pushes the item branch by explicit refspec and opens a draft PR against the base with the review package and screenshots, or updates the body of an existing PR. Never pushes the base or force pushes; without a remote or gh it pushes nothing and reports the skip","Draft PR; PR link or skip in FACTS.md","seq","Item branch"]]},
+ {d:"complete",n:"5. Complete",orch:"After CP3: FINAL.md with Delivery, close-out commit; with an item branch, rebase, leased force push, PR ready, CI fixes; before CP4, base-moved check; after the merge, delivery outcome and compact or archive commits on the base. Without an item branch, compact or archive as chosen at Kickoff",cp:["CP4 Merge","changes since CP3 and the new head to accept, CI result or no CI, reminder if no approving review; yes merges (local without a remote, else gk ff or plain git --no-ff) and pushes the base, then two records-only commits on the base, then the item branch delete"],a:[
+  ["docs","Folds lasting docs and the benchmark table into the feature docs and links the final screenshots verification saved there. Runs at the documentation fold-back, before CP3","Feature docs, e.g. docs/features/&lt;feature&gt;/","seq","All tiers"],
+  ["retro","Turns the item's accepted review lessons into checks, rubric lines and project review rules: at most 5 changes, each citing its findings; creates the rules only on your Kickoff yes. Runs beside docs at the fold-back; its changes get their own review round and a gate re-check","<code>.agents/rules/review/</code>; changes and deferrals for FINAL.md's Review memory","seq","Tiered items"],
+  ["ci","Reports the ready PR's head: green, red with the failing check and a log excerpt, pending, blocked or no CI. Reads only; the main agent fixes, commits and pushes, at most 3 attempts before asking you. Missing checks are never green","CI state for FACTS.md and FINAL.md's Delivery section","seq","Item branch"]]}
+];
+const card=([f,what,out,run,tier,skill,opt],d)=>`<div class="ag${opt?' opt':''}"><span class="f">${d}/${f}.md</span><span>${what}</span><span class="row"><b>Writes:</b> ${out}</span><div class="tags"><span class="t ${run}">${run=="par"?"parallel":"in order"}</span><span class="t">${tier}</span>${skill?`<span class="t skill">uses ${skill}</span>`:""}</div></div>`;
+document.getElementById('map').innerHTML=S.map(s=>`<div class="stage"><div class="sh"><b>${s.n}</b><code>${s.d}/</code><div class="orch"><b>Main agent</b>${s.orch}</div></div><div class="agents">${s.a.map(a=>card(a,s.d)).join('')}</div></div>`+(s.cp?`<div class="cp"><span>${s.cp[0]}</span>${s.cp[1]}</div>`:"")).join('');
+</script></body></html>

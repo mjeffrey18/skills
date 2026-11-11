@@ -1,0 +1,5 @@
+interface:
+  display_name: "Handoff"
+  short_description: "Write, complete or resume a chained handoff"
+policy:
+  allow_implicit_invocation: true
