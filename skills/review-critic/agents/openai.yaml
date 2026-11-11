@@ -1,0 +1,7 @@
+interface:
+  display_name: "Review critic"
+  short_description: "Build an adversarial, lens-specific review brief"
+  default_prompt: "Use $review-critic to build an adversarial review brief for this change."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Goal Builder"
+  short_description: "Grill in rubric-bounded rounds, then write a GOAL.md completion contract"
+  default_prompt: "Build a goal document for the work we have been discussing."
+policy:
+  allow_implicit_invocation: false

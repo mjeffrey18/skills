@@ -1,0 +1,7 @@
+interface:
+  display_name: "pi review loop"
+  short_description: "Have pi review the current change on local models and loop on its feedback"
+  default_prompt: "Use $review-loop-pi orchestrator to have pi review this change."
+
+policy:
+  allow_implicit_invocation: false

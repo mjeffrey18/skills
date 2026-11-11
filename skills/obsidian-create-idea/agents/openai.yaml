@@ -1,0 +1,5 @@
+interface:
+  display_name: "Create Obsidian Idea"
+  short_description: "Capture an idea as an inbox note in an Obsidian vault"
+policy:
+  allow_implicit_invocation: true

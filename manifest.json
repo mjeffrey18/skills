@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "source": "agents@cf3ffa8a",
+  "root_sha256": "315929fda755c3234e503606aa5a498c1b2bd816f5ea481cae71a0c8fe30f62f",
+  "skills": {
+    "claude-code": {
+      "version": 1,
+      "sha256": "7a59fa842754e23e0e4970fe24293c632cae83a404f2d4a86e0bf235cdd0872d"
+    },
+    "codex": {
+      "version": 1,
+      "sha256": "377a3b74e6009ba67e55646552be430efc73c3ca69219d688233d1d6d3115ad6"
+    },
+    "full-send": {
+      "version": 1,
+      "sha256": "360617db85d76654d334c5d1d93fe21771832fc11dc6ce0e23655928f0d130f8"
+    },
+    "full-stop": {
+      "version": 1,
+      "sha256": "eca26c5a3f315c138e0a7330f40c6ac6922eb3eb21a4c034dfff89db3f1b88da"
+    },
+    "git-kiss": {
+      "version": 1,
+      "sha256": "fde7ffd9082878b27b42b07d0084d231f366f5958a198ecb4e1008cc1f37ccf8"
+    },
+    "goal-builder": {
+      "version": 1,
+      "sha256": "bbb0239910c31efddf0fb06b49a3bb74860bb1bb5e217eea6c897227ccf4129d"
+    },
+    "gsd": {
+      "version": 1,
+      "sha256": "1818b96303a194784c042d280ea9ea55679e631242fba03b02155a66679bf42f"
+    },
+    "handoff": {
+      "version": 1,
+      "sha256": "d7b5c5093a0f7061fe4ba95025af77579a4c1df8cb315596b2d5ce15f262dfea"
+    },
+    "modernise": {
+      "version": 1,
+      "sha256": "45ab3c8e193a70544324fab535402235dcb77e96561d815f0371f377c28b28d6"
+    },
+    "obsidian-create-idea": {
+      "version": 1,
+      "sha256": "1ca97ff10d640010c7865ac2dedd5917545a1fa2fbcaf512dbe7c599bce7103c"
+    },
+    "obsidian-project": {
+      "version": 1,
+      "sha256": "053c1b7c5a8d6739c643b70e1eaac28e9cea22bfca11ebad844c45edeaa3fd1f"
+    },
+    "pi": {
+      "version": 1,
+      "sha256": "f199dad3e89bbd66fedfc257171d157716e4761bf960055929e660eb3f0e7dd2"
+    },
+    "rebase": {
+      "version": 1,
+      "sha256": "fa60568d6d56749167815cac9087031bbe0350a77aca46ad54223d9f67de097b"
+    },
+    "review-critic": {
+      "version": 1,
+      "sha256": "171293fdb42fdfe45899c232dc2959ef1a5cbc4d4a1dc88a07bc10238165b357"
+    },
+    "review-local": {
+      "version": 1,
+      "sha256": "77d2d8a7e8565f2206395c248666ec00e01efe81333c6f1638ee721062af32a1"
+    },
+    "review-loop-claude": {
+      "version": 1,
+      "sha256": "8e6c47742e3ad6a2450ff358792d023b3cbc1c320278a322d09eb11d8581e8b8"
+    },
+    "review-loop-codex": {
+      "version": 1,
+      "sha256": "fdf8744e9a818c83a9b02479af3a5e93c1f57a1dfcc14bb3146445183cb0e5c8"
+    },
+    "review-loop-engine": {
+      "version": 1,
+      "sha256": "86c66a834b9263424bdb4ab894f436795a1954bd564ac95af901b7b530ad4574"
+    },
+    "review-loop-pi": {
+      "version": 1,
+      "sha256": "ac909b3d0ce4564d8b9c39bb9a1b6e4f2cf8ecb3bb8cd623b6510629a98fedf2"
+    },
+    "triage": {
+      "version": 1,
+      "sha256": "ecf7c5728ce2eba4954052bf8e78709441a2173766174e8637c68de4d8b06757"
+    }
+  }
+}

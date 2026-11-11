@@ -1,0 +1,7 @@
+interface:
+  display_name: "Local review"
+  short_description: "One adversarial review pass in this harness; verifies findings and fixes the confirmed ones"
+  default_prompt: "Use $review-local to review the current change."
+
+policy:
+  allow_implicit_invocation: false

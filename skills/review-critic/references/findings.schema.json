@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "withdrawn", "findings"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["approve", "changes_requested"] },
+    "summary": { "type": "string" },
+    "withdrawn": { "type": "array", "items": { "type": "string" } },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "lens",
+          "title",
+          "location",
+          "problem",
+          "evidence",
+          "fix",
+          "status"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] },
+          "lens": { "type": "string" },
+          "title": { "type": "string" },
+          "location": { "type": "string" },
+          "problem": { "type": "string" },
+          "evidence": { "type": "string" },
+          "fix": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["new", "still_open", "contested"]
+          }
+        }
+      }
+    }
+  }
+}

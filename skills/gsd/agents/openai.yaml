@@ -1,0 +1,6 @@
+interface:
+  display_name: "GSD"
+  short_description: "Coordinate persistent work documents and delivery"
+  default_prompt: "Use $gsd to resume the current work item and carry out its next authorised step."
+policy:
+  allow_implicit_invocation: false
