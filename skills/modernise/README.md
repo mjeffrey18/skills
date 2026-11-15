@@ -1,6 +1,6 @@
 # modernise
 
-Version 1
+Version 2
 
 Bring a stale branch up to date. The skill rebases the branch, checks whether its change is still relevant and finds useful changes on the updated base. Then it recommends whether to close, amend or merge the branch. You invoke it by name.
 

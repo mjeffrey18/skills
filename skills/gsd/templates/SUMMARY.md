@@ -1,12 +1,12 @@
 ---
-slug: {item folder name}
-title: {title}
-type: {feature or goal}
-complexity: {L1, L2 or L3; remove if untiered}
-delivery: {verified or cancelled}
-completed: {YYYY-MM-DD; use cancelled: for a cancelled item}
-record: {full SHA of the close-out commit that holds the whole item folder}
-updated: {date}
+slug: { item folder name }
+title: "{title}"
+type: { feature or goal }
+complexity: { L1, L2 or L3; remove if untiered }
+delivery: { verified or cancelled }
+completed: { YYYY-MM-DD; use cancelled: for a cancelled item }
+record: { full SHA of the close-out commit that holds the whole item folder }
+updated: "{date}"
 version: 1
 ---
 

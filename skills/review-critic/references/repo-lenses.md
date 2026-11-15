@@ -10,10 +10,10 @@ them beside the built-in lenses, so the reviewer needs no access to them.
 same shape as the lens table in [SKILL.md](../SKILL.md):
 
 ```markdown
-| Lens    | Signals in the change                          | File       |
-| ------- | ---------------------------------------------- | ---------- |
-| rails   | Any Rails change                               | rails.md   |
-| billing | `app/billing/`, invoices, Stripe webhooks      | billing.md |
+| Lens    | Signals in the change                     | File       |
+| ------- | ----------------------------------------- | ---------- |
+| rails   | Any Rails change                          | rails.md   |
+| billing | `app/billing/`, invoices, Stripe webhooks | billing.md |
 ```
 
 - **Lens** - a built-in lens name extends that lens. Any other name adds a
@@ -79,7 +79,7 @@ of the reviewed change like any other file.
    ```
 
 3. Inline a chosen repo lens verbatim under `### <name> (repo lens,
-   .agents/rules/review/<file>)`.
+.agents/rules/review/<file>)`.
 4. Findings use the lens name - `rails` for both the built-in lens and its
    additions, the repo lens's own name otherwise.
 

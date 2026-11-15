@@ -1,6 +1,6 @@
 # gsd
 
-Version 1
+Version 2
 
 GSD manages a piece of work as a set of Markdown documents in your repository, under `.agents/gsd/<date>-<slug>/`. It covers the full life of an item: the idea, decisions, facts, plan, spec, TODOs, reviews and the final summary. Three human checkpoints control the work: Kickoff, Pre-implementation and Review. A complexity tier from L1 to L3 decides how much planning, review and verification an item needs.
 

@@ -1,6 +1,6 @@
 # handoff
 
-Version 1
+Version 2
 
 Write, complete or resume a handoff document, so a fresh agent in any harness can carry on the work. Each handoff links to the one before it. The bundled script scaffolds, validates and checks handoffs for staleness.
 

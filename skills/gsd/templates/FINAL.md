@@ -1,5 +1,5 @@
 ---
-updated: {date}
+updated: "{date}"
 version: 1
 ---
 
@@ -57,9 +57,9 @@ CP3 close-out. The PR or local delivery ledger tracks the later delivery result.
 {Fold only; remove for Archive and Compact. The map accepted at CP3: one row
 per lasting fact. Create a page only where no existing page fits.}
 
-| Fact | Destination (file, section) | Action | Why this page |
-| --- | --- | --- | --- |
-| {Lasting fact} | {docs/features/x.md, Usage} | {edit, append or new page} | {Reason} |
+| Fact           | Destination (file, section) | Action                     | Why this page |
+| -------------- | --------------------------- | -------------------------- | ------------- |
+| {Lasting fact} | {docs/features/x.md, Usage} | {edit, append or new page} | {Reason}      |
 
 ## Limitations and follow-up
 

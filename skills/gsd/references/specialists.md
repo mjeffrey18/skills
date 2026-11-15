@@ -30,8 +30,8 @@ Each activity lists its candidate, then compatibility and the fallback.
   Confirm it permits local research and does not publish or require
   unrelated setup. Fall back to repository inspection and authoritative
   sources.
-- Plan implementation: an applicable planning skill, including plan-mode
-  where mandated. Honour the harness's planning and delegation rules; some
+- Plan implementation: an applicable planning skill where one is
+  mandated. Honour the harness's planning and delegation rules; some
   modes cannot persist files. Fall back to local planning only when no
   mandatory route applies.
 - Define terms or an ADR: domain-modeling. Use it only when changing domain
@@ -120,11 +120,23 @@ read no project review rules from it until it is renamed.
 The skill sets the order of its own agents in a stage; any other agent in
 that stage runs in parallel. At most 4 subagents are active at once in a
 stage, and the rest queue, so a stage with many overrides does not flood the
-machine or the provider. Launch subagents through T3 Code when it is present,
-so each child has a thread the user can watch and stop. Outside T3 Code, a
-subagent on the session's own provider and model uses the harness's own
-subagent tool (Claude Code's Agent tool, Codex's spawn_agent); another
-provider goes through the claude-code, codex or pi skill.
+machine or the provider.
+
+In T3 Code, choose the launch route by what the child does:
+
+- A child that writes files or runs for minutes, such as an implementer or
+  the simplifier, starts with `delegate_task`, so it has a thread the user
+  can watch and stop. So does any background or parallel child.
+- A short, blocking, read-only child, such as a scout, uses the harness's own
+  subagent tool. Its result returns inline, and a thread for each lookup
+  would bury the threads worth watching.
+- A cross-agent review round uses the CLI, as review-loop-engine requires.
+
+Outside T3 Code, a subagent on the session's own provider and model uses the
+harness's own subagent tool (Claude Code's Agent tool, Codex's spawn_agent).
+In both cases another provider goes through the claude-code, codex or pi
+skill, which chooses between a T3 Code child and the CLI. If a provider or
+model is unavailable, report it; do not substitute another.
 
 Topology: by default one implementer subagent on the same provider and model
 as the session. Run implementers in parallel only when the slices touch

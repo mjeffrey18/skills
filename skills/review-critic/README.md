@@ -1,6 +1,6 @@
 # review-critic
 
-Version 1
+Version 2
 
 Build an adversarial review brief. The skill picks up to three lenses that fit the change, such as security, tests, performance, Rails or database, and adds the adversarial stance and a findings contract. A fresh sub-agent then writes the reviewer's prompt, so the author's framing never reaches the reviewer.
 

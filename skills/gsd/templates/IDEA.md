@@ -7,7 +7,7 @@ stage: ideation
 delivery: proposed
 complexity: "{L1, L2 or L3, once the user confirms it}"
 created: "{date}"
-updated: {date}
+updated: "{date}"
 version: 1
 next_action: "{next authorised step}"
 responsible: agent

@@ -1,6 +1,6 @@
 # pi
 
-Version 1
+Version 2
 
 Delegate analysis, implementation or review to the [pi](https://github.com/earendil-works/pi) coding agent on your own model routes. The skill covers route and thinking choice, tool and permission controls, JSON output and resumed sessions.
 

@@ -45,8 +45,9 @@ Do:
 - Do not write a check yourself: return it as a proposal with the test
   file, what it asserts and the source finding. The implementer writes it
   under CP2's authority, or the orchestrator defers it if it is large.
-- Keep entries short and in the file's ` | `-separated form, so
-  `gsd validate` accepts them. Run `gsd validate` after the change.
+- Keep entries short and in the file's form: fields separated by a pipe
+  with a space on each side (` | `). `gsd validate` rejects a pipe without
+  the spaces. Run `gsd validate` after the change.
 
 Return: each change made (file, entry, source finding IDs), each proposal
 deferred with the reason, every change to `settled`, `risk_paths` or

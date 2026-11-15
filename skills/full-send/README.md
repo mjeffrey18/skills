@@ -1,6 +1,6 @@
 # full-send
 
-Version 1
+Version 2
 
 Finish an existing branch from start to end. The skill rebases it, closes out any GSD item, answers PR comments, waits for green CI, merges locally, publishes and cleans up the worktree. You invoke it by name, and it never runs on its own.
 

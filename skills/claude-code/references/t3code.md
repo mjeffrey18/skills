@@ -7,32 +7,31 @@ can open its thread, and can stop it there.
 
 ## Run the task
 
-1. Call `orchestrator_capabilities` once per thread, before the first
-   `delegate_task`. Confirm that the `claudeAgent` provider instance lists
-   the model you need.
-2. Call `delegate_task` with:
+T3 Code supplies the `delegate_task` schema and its own rules: call
+`orchestrator_capabilities` once per thread, do not poll a running child, and
+stop one you no longer need with `task_cancel`. Follow them. This file adds
+only what is specific to Claude Code.
 
-   | Field                       | Value                                                                      |
-   | --------------------------- | -------------------------------------------------------------------------- |
-   | `target.providerInstanceId` | `claudeAgent`                                                              |
-   | `target.model`              | `claude-opus-5-5` (default) or `claude-fable-5-1`                          |
-   | `target.options`            | `{"effort": "medium"}` unless the user sets one                            |
-   | `interactionMode`           | `plan` for analysis, planning and review; omit for implementation          |
-   | `role`                      | `implementation`, `research`, `review`, `design`, `test` or `general`      |
-   | `isolation`                 | `worktree` for risky or parallel changes; `shared` (the default) otherwise |
-   | `mode`                      | `wait` only when this turn needs the result; `async` otherwise             |
-   | `title`                     | A short name the user will recognise in the thread list                    |
-   | `task`                      | The complete brief - see [SKILL.md](../SKILL.md) for what it must contain  |
+Run the [subscription check](#subscription) before the first `delegate_task`
+in a thread.
 
-3. With `async`, end the turn or carry on with other work. T3 Code wakes you
-   when the child finishes. Do not poll with `task_status`, `sleep` or a
-   watcher. With `wait`, a question or approval request from the child ends
-   the wait; answer it or report it.
-4. Read the result from `summary`, and check that the returned `model` is the
-   one you asked for. Then inspect the changed files and run the checks. For
-   `isolation: worktree`, the changes are in the child's worktree, not your
-   checkout - inspect them there and say where they are.
-5. Stop a child you no longer need with `task_cancel`.
+| Field                       | Value                                                                      |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `target.providerInstanceId` | `claudeAgent`                                                              |
+| `target.model`              | Opus by default, or Fable - use the ID that `orchestrator_capabilities` lists |
+| `target.options`            | `{"effort": "medium"}` unless the user sets one                            |
+| `interactionMode`           | `plan` for analysis, planning and review; omit for implementation          |
+| `isolation`                 | `worktree` for risky or parallel changes; `shared` (the default) otherwise |
+| `mode`                      | `wait` only when this turn needs the result; `async` otherwise             |
+| `task`                      | The complete brief - see [SKILL.md](../SKILL.md) for what it must contain  |
+
+With `wait`, a question or approval request from the child ends the wait;
+answer it or report it.
+
+Read the result from `summary`, and check that the returned `model` is the
+one you asked for. Then inspect the changed files and run the checks. For
+`isolation: worktree`, the changes are in the child's worktree, not your
+checkout - inspect them there and say where they are.
 
 Set `effort` explicitly. Options inherited from a non-Claude parent do not
 apply.

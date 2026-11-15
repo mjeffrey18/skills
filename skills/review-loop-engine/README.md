@@ -1,6 +1,6 @@
 # review-loop-engine
 
-Version 1
+Version 2
 
 Run a cross-agent review loop with you in the loop. Your current agent scopes the change and confirms the scope with you. Claude Code, Codex or pi then reviews it read-only. Your agent fixes or rebuts each finding, and the loop repeats for up to three rounds before a final report.
 

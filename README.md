@@ -1,6 +1,6 @@
 # Agent Skills
 
-Release v1
+Release v2
 
 Skills for coding agents such as Claude Code, Codex, pi and OpenCode. Each skill is a folder in the open [Agent Skills](https://agentskills.io) format: a `SKILL.md` file with instructions, plus any references, templates and scripts it needs.
 
@@ -12,24 +12,25 @@ Some skills still refer to the setup they were written for: particular harnesses
 
 | Skill                                                         | Version | What it does                                                                                                                         |
 | ------------------------------------------------------------- | :-----: | ------------------------------------------------------------------------------------------------------------------------------------ |
-| [claude-code](skills/claude-code/README.md)                   |    1    | Delegate analysis, implementation or review to Claude Code from another agent harness, such as Codex or pi.                          |
-| [codex](skills/codex/README.md)                               |    1    | Delegate analysis, implementation or review to the Codex CLI from another agent harness.                                             |
-| [full-send](skills/full-send/README.md)                       |    1    | Finish an existing branch from start to end.                                                                                         |
+| [claude-code](skills/claude-code/README.md)                   |    2    | Delegate analysis, implementation or review to Claude Code from another agent harness, such as Codex or pi.                          |
+| [codex](skills/codex/README.md)                               |    2    | Delegate analysis, implementation or review to the Codex CLI from another agent harness.                                             |
+| [full-send](skills/full-send/README.md)                       |    2    | Finish an existing branch from start to end.                                                                                         |
 | [full-stop](skills/full-stop/README.md)                       |    1    | Prepare an existing branch for merging and then stop.                                                                                |
-| [git-kiss](skills/git-kiss/README.md)                         |    1    | A reference for [git-kiss](https://github.com/mjeffrey18/git-kiss) (`gk`), a small CLI for rebase-based git workflows.               |
+| [git-kiss](skills/git-kiss/README.md)                         |    2    | A reference for [git-kiss](https://github.com/mjeffrey18/git-kiss) (`gk`), a small CLI for rebase-based git workflows.               |
 | [goal-builder](skills/goal-builder/README.md)                 |    1    | Turn a long-horizon objective into a `GOAL.md` completion contract.                                                                  |
-| [gsd](skills/gsd/README.md)                                   |    1    | GSD manages a piece of work as a set of Markdown documents in your repository, under `.agents/gsd/<date>-<slug>/`.                   |
-| [handoff](skills/handoff/README.md)                           |    1    | Write, complete or resume a handoff document, so a fresh agent in any harness can carry on the work.                                 |
-| [modernise](skills/modernise/README.md)                       |    1    | Bring a stale branch up to date.                                                                                                     |
+| [gsd](skills/gsd/README.md)                                   |    2    | GSD manages a piece of work as a set of Markdown documents in your repository, under `.agents/gsd/<date>-<slug>/`.                   |
+| [handoff](skills/handoff/README.md)                           |    2    | Write, complete or resume a handoff document, so a fresh agent in any harness can carry on the work.                                 |
+| [modernise](skills/modernise/README.md)                       |    2    | Bring a stale branch up to date.                                                                                                     |
 | [obsidian-create-idea](skills/obsidian-create-idea/README.md) |    1    | Capture a new idea as one note in an Obsidian vault's inbox.                                                                         |
 | [obsidian-project](skills/obsidian-project/README.md)         |    1    | Create, resume and maintain a project in an Obsidian vault, from the first scoping to close-out or reopening.                        |
-| [pi](skills/pi/README.md)                                     |    1    | Delegate analysis, implementation or review to the [pi](https://github.com/earendil-works/pi) coding agent on your own model routes. |
-| [rebase](skills/rebase/README.md)                             |    1    | Run or finish a git rebase in place and resolve its conflicts.                                                                       |
-| [review-critic](skills/review-critic/README.md)               |    1    | Build an adversarial review brief.                                                                                                   |
+| [pi](skills/pi/README.md)                                     |    2    | Delegate analysis, implementation or review to the [pi](https://github.com/earendil-works/pi) coding agent on your own model routes. |
+| [rebase](skills/rebase/README.md)                             |    2    | Run or finish a git rebase in place and resolve its conflicts.                                                                       |
+| [review-council](skills/review-council/README.md)             |    1    | A review panel.                                                                                                                      |
+| [review-critic](skills/review-critic/README.md)               |    2    | Build an adversarial review brief.                                                                                                   |
 | [review-local](skills/review-local/README.md)                 |    1    | A quick review in your current harness.                                                                                              |
 | [review-loop-claude](skills/review-loop-claude/README.md)     |    1    | Have Claude Code review your current change in a fix-and-re-review loop of up to three rounds, with you in the loop.                 |
 | [review-loop-codex](skills/review-loop-codex/README.md)       |    1    | Have Codex review your current change in a fix-and-re-review loop of up to three rounds, with you in the loop.                       |
-| [review-loop-engine](skills/review-loop-engine/README.md)     |    1    | Run a cross-agent review loop with you in the loop.                                                                                  |
+| [review-loop-engine](skills/review-loop-engine/README.md)     |    2    | Run a cross-agent review loop with you in the loop.                                                                                  |
 | [review-loop-pi](skills/review-loop-pi/README.md)             |    1    | Have pi review your current change on your own models in a fix-and-re-review loop of up to three rounds, with you in the loop.       |
 | [triage](skills/triage/README.md)                             |    1    | Walk through a list of items one decision at a time.                                                                                 |
 

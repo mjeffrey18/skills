@@ -1,5 +1,5 @@
 ---
-updated: {date}
+updated: "{date}"
 version: 1
 ---
 
@@ -56,9 +56,9 @@ version: 1
 - Procedure: {Command and batch seed data; at least 5 runs per variant, alternating A and B; PLAN's threshold, if any.}
 - Evidence: {The table, then the raw runs or a link to them under research/.}
 
-| Metric | Baseline | Result | Method | Environment | Runs per variant |
-| --- | --- | --- | --- | --- | --- |
-| {p50 latency} | {median (min-max)} | {median (min-max)} | {tool} | {machine} | {5} |
+| Metric        | Baseline           | Result             | Method | Environment | Runs per variant |
+| ------------- | ------------------ | ------------------ | ------ | ----------- | ---------------- |
+| {p50 latency} | {median (min-max)} | {median (min-max)} | {tool} | {machine}   | {5}              |
 
 ## Useful failed approaches
 

@@ -8,15 +8,20 @@ For Rails apps: models, controllers, jobs, migrations, views. Attack:
 - **Callbacks** - side effects in `before_*`/`after_save` (emails, jobs, API
   calls) that fire on every save, inside a transaction that may roll back; use
   `after_commit` for external effects.
-- **Validation gaps** - `update_all`, `update_column`, `insert_all` and
-  `delete_all` skipping validations and callbacks; uniqueness validated
-  without a unique index (race).
+- **Validation gaps** - `update_all`, `update_column`, `insert_all`,
+  `delete_all` and `save(validate: false)` skipping validations and
+  callbacks; uniqueness validated without a unique index (race); a guard on
+  an attribute that a later callback overwrites, or totals worked out after
+  validation has run.
 - **Parameters** - `permit!`, permitting nested or admin-only attributes, mass
   assignment of foreign keys or roles.
 - **Authorisation** - records found by id without scoping to the current
   user or account (`current_user.orders.find` vs `Order.find`).
 - **Transactions** - multi-record writes without one; network calls inside a
-  transaction; `rescue` inside a transaction block hiding a rollback.
+  transaction; `rescue` inside a transaction block hiding a rollback; an
+  inner `transaction` that joins the caller's, so its failure commits
+  partial writes (`requires_new:`); locks taken in a different order from
+  other paths; `lock_version` missing where stale forms can overwrite.
 - **Jobs** - not idempotent under retry, arguments that are records deleted
   before the job runs, enqueued before the transaction commits.
 - **Migrations** - see the `database` lens; in particular locking a large

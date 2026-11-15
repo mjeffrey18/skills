@@ -11,9 +11,9 @@ cannot be "None".
 ---
 title: Short task title
 created: 2026-09-28T18:30:00+04:00
-status: draft            # draft -> complete -> superseded
-harness: claude          # claude, codex, pi, manual ...
-trigger: manual          # manual, or compact-auto / compact-manual / compact-threshold
+status: draft # draft -> complete -> superseded
+harness: claude # claude, codex, pi, manual ...
+trigger: manual # manual, or compact-auto / compact-manual / compact-threshold
 session: <harness session id, if known>
 gsd_item: 2026-09-15-gsd # empty when there is no GSD item
 branch: main
@@ -24,38 +24,49 @@ continues_from: 2026-09-27-101500-previous.md
 # Handoff: Short task title
 
 ## Current state
+
 One paragraph: what is being worked on, how far it got, exactly where it stopped.
 
 ## Work item
+
 GSD item link, or "No GSD item".
 
 ## Work completed
+
 - Bullets for what this session finished, referencing commits or files.
 
 ## Decisions made
+
 - Decision - rationale - options rejected. For a GSD item, link DECISIONS.md.
 
 ## Immediate next steps
+
 1. The first thing the next agent does.
 2. ...
 
 ## Blockers and open questions
+
 - Blocker or question - what would unblock it. "None" when there are none.
 
 ## Important context
+
 Assumptions, gotchas, failed approaches and user preferences that are not obvious
 from the code or documents. This is the section the next agent most needs.
 
 ## Critical files
+
 - `path/to/file.ts:142` - why it matters for the next step.
 
 ## Suggested skills
+
 - Skills the next agent should run, or "None".
 
 ## Environment state
+
 Filled in automatically: repository, branch, HEAD, recent commits, uncommitted files.
 
 ## Chain
+
 Continues from [previous handoff](previous.md), or "Start of chain".
 ```
 

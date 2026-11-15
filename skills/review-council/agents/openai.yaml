@@ -1,0 +1,7 @@
+interface:
+  display_name: "Review council"
+  short_description: "Two or three reviewers on different CLIs review the change in parallel; findings are verified and merged"
+  default_prompt: "Use $review-council moderate to review this change."
+
+policy:
+  allow_implicit_invocation: false
