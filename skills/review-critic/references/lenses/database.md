@@ -15,6 +15,13 @@ busy production table unless the change says otherwise. Attack:
   for a destructive change.
 - **Integrity** - uniqueness or foreign keys enforced only in application code;
   cascade deletes wider than intended; nullable columns that should not be.
+- **Unique by assumption** - a lookup on a key that is not unique, a blank or
+  differently normalised key (case, whitespace) that matches the wrong rows,
+  or a view that breaks ties nondeterministically.
+- **Lost updates** - a form, confirmation or job that writes back a value
+  read earlier, with no version or baseline check, so a stale write wins.
+- **Lock order** - a new lock taken in a different order from existing paths
+  that lock the same rows or tables (deadlock).
 - **Indexes** - new query patterns without a supporting index; redundant
   indexes; index column order not matching the filter.
 - **Types and values** - enum or status values reordered or removed, time zone

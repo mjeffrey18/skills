@@ -1,5 +1,5 @@
 ---
-updated: {date}
+updated: "{date}"
 version: 1
 # Project review rules: reviewer guidance, installed as .agents/rules/review/REVIEW.md.
 # Each entry with fields is one list item, its fields separated by " | ".

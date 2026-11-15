@@ -41,18 +41,18 @@ pi -p --mode json --model gateway/orchestrator --thinking high \
   -- "<prompt text>" < /dev/null
 ```
 
-| Control                                | Purpose                                                                                      |
-| -------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `--tools read,grep,find,ls`            | Allowlist for built-in, extension and custom tools: no bash, edit, write or sub-agents       |
-| `--no-extensions`                      | No extension tools or hooks (sub-agents, web access, codemode); also drops built-in MCP      |
-| `--no-mcp`                             | No MCP servers or tools. `--tools` keeps MCP tools, so this is set explicitly |
-| `--no-skills`, `--no-prompt-templates` | The reviewer cannot load this or any other skill and recurse                                 |
-| `--no-approve`                         | Ignores project-local pi files, which could add tools                                        |
-| `--no-context-files`                   | No global or project AGENTS.md; the prompt names the standards files to read                 |
-| `--append-system-prompt`               | Names the four tools and the JSON-only reply (see Output)                                    |
-| `--session-dir`, `--session-id`        | Sessions live in the packet; the same ID resumes exactly                                     |
-| prompt as an argument                  | Passed as `@file`, pi treats the prompt as untrusted file contents and may not follow it     |
-| `< /dev/null`                          | pi waits on an open stdin in print mode and never starts                                     |
+| Control                                | Purpose                                                                                  |
+| -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `--tools read,grep,find,ls`            | Allowlist for built-in, extension and custom tools: no bash, edit, write or sub-agents   |
+| `--no-extensions`                      | No extension tools or hooks (sub-agents, web access, codemode); also drops built-in MCP  |
+| `--no-mcp`                             | No MCP servers or tools. `--tools` keeps MCP tools, so this is set explicitly            |
+| `--no-skills`, `--no-prompt-templates` | The reviewer cannot load this or any other skill and recurse                             |
+| `--no-approve`                         | Ignores project-local pi files, which could add tools                                    |
+| `--no-context-files`                   | No global or project AGENTS.md; the prompt names the standards files to read             |
+| `--append-system-prompt`               | Names the four tools and the JSON-only reply (see Output)                                |
+| `--session-dir`, `--session-id`        | Sessions live in the packet; the same ID resumes exactly                                 |
+| prompt as an argument                  | Passed as `@file`, pi treats the prompt as untrusted file contents and may not follow it |
+| `< /dev/null`                          | pi waits on an open stdin in print mode and never starts                                 |
 
 pi's read tools take absolute paths, so the reviewer can read a sibling
 checkout without extra flags. Do not widen these controls to get past a

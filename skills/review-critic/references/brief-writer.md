@@ -63,6 +63,10 @@ it yourself and you do not edit the repository.
    repo-lenses.md shows, fill in the project review rules from step 3 (or
    leave that section out when there are none), the scope, intent, spec,
    standards and your questions. Never copy a settled entry into it.
+   Write it with your file-writing tool, in one call. Do not assemble it
+   with a shell command (heredocs, `cat`, `sed`, redirection): a harness
+   stops and asks the user to approve a command like that, and the review
+   waits until they do.
 6. Reply with only: the lenses chosen, one line each on why, the repo
    additions and repo lenses used, whether project review rules were inlined
    (or the legacy-name collision found), any problem with the repo index,

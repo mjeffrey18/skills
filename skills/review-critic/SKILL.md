@@ -1,6 +1,6 @@
 ---
 name: review-critic
-description: Build an adversarial review brief - pick up to 3 lenses (plan, spec, general, maintainability, security, performance, tests, operability, ruby, rails, frontend, database, agent-config) from the change, attach the adversarial stance and the findings contract, and have a fresh brief-writer subagent write the reviewer's prompt so the author's framing never reaches the reviewer. Use when review-loop-engine or review-local prepares a review, or for any code or plan review that needs a lens-specific, adversarial brief. Not a review runner - it prepares what a reviewer is told.
+description: Build an adversarial review brief - pick up to 3 lenses (plan, spec, general, maintainability, security, performance, tests, operability, ruby, rails, frontend, database, data-pipeline, infra, agent-config, llm-feature, evals) from the change, attach the adversarial stance and the findings contract, and have a fresh brief-writer subagent write the reviewer's prompt so the author's framing never reaches the reviewer. Use when review-loop-engine or review-local prepares a review, or for any code or plan review that needs a lens-specific, adversarial brief. Not a review runner - it prepares what a reviewer is told.
 user-invocable: false
 ---
 
@@ -52,14 +52,22 @@ withhold, and the fallback when the harness has no subagents.
 | rails           | `app/`, `config/routes.rb`, `db/migrate/`, ActiveRecord, ActiveJob, controllers                                        | [rails](references/lenses/rails.md)                     |
 | frontend        | `*.tsx`, `*.jsx`, `*.vue`, `*.svelte`, CSS, templates, client state                                                    | [frontend](references/lenses/frontend.md)               |
 | database        | Migrations, schema files, raw SQL, indexes, backfills                                                                  | [database](references/lenses/database.md)               |
+| data-pipeline   | Analytics SQL, transformation models, ETL/ELT jobs, replication or CDC, reports and dashboards                          | [data-pipeline](references/lenses/data-pipeline.md)     |
+| infra           | Infrastructure as code, cloud or database grants, container images, service units, provisioning and shell scripts      | [infra](references/lenses/infra.md)                     |
 | agent-config    | Skills, AGENTS.md/CLAUDE.md, hooks, agent settings, deploy manifests                                                   | [agent-config](references/lenses/agent-config.md)       |
+| llm-feature     | Product features on a language model: system prompts, tool definitions and gating, model-driven actions                | [llm-feature](references/lenses/llm-feature.md)         |
+| evals           | Eval suites, graders, scorers, LLM judges, and gates built on their results                                            | [evals](references/lenses/evals.md)                     |
 
 When a spec exists, prefer `spec` as one of the three - it is the axis most
 often skipped.
 
 Choose by risk, not by file count: a one-line change to an auth check earns
 `security` over `general`. Language lenses (`ruby`, `rails`, `frontend`) pair
-well with one risk lens. Never more than 3 - a longer brief dilutes attention,
+well with one risk lens. Some lenses split one area by purpose: `database`
+for schema changes and transactional SQL, `data-pipeline` for analytics and
+reporting results; `agent-config` for instructions the coding agents obey,
+`llm-feature` for a product's own prompts and tools, and `evals` for the
+graders that judge them. Never more than 3 - a longer brief dilutes attention,
 especially on local models.
 
 ## Using it

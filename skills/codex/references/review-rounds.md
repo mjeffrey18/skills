@@ -37,19 +37,19 @@ env -u CODEX_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
 Run `codex login status` with the same `env` prefix first; stop unless it
 exits 0 and reports ChatGPT sign-in.
 
-| Control                                  | Purpose                                                                                   |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `env -u CODEX_API_KEY ...`               | Uses the ChatGPT sign-in; a set `CODEX_API_KEY` would be used instead and bill the API     |
-| `--ignore-user-config`                   | Skips `config.toml`: no configured MCP servers, profiles or model overrides. Auth still comes from `CODEX_HOME` |
-| `--disable apps`, `plugins`              | No ChatGPT connectors or plugin tools, which load even without user config               |
-| `multi_agent` + `agents.enabled=false`   | No sub-agent tools - `multi_agent` alone left `spawn_agent` in place                      |
-| browser, computer-use, image, goals, `web_search="disabled"` | No web, browser, desktop or image tools                              |
-| `model_provider`, `forced_login_method`  | First-party OpenAI provider and ChatGPT sign-in, even if another config layer selects a proxy or API key |
-| `-m` and `review_model`                  | Pins Sol or Astra; the second stops a configured review model swapping it                 |
-| `--sandbox read-only`                    | OS-enforced: no file writes and no network from shell commands                            |
-| `approval_policy="never"`                | Blocked actions fail instead of waiting for an approval nobody will give                  |
-| `--output-schema`                        | The final message must match the findings schema                                          |
-| `-` with stdin                           | The prompt comes from the file; with an argument prompt, exec also waits on stdin         |
+| Control                                                      | Purpose                                                                                                         |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `env -u CODEX_API_KEY ...`                                   | Uses the ChatGPT sign-in; a set `CODEX_API_KEY` would be used instead and bill the API                          |
+| `--ignore-user-config`                                       | Skips `config.toml`: no configured MCP servers, profiles or model overrides. Auth still comes from `CODEX_HOME` |
+| `--disable apps`, `plugins`                                  | No ChatGPT connectors or plugin tools, which load even without user config                                      |
+| `multi_agent` + `agents.enabled=false`                       | No sub-agent tools - `multi_agent` alone left `spawn_agent` in place                                            |
+| browser, computer-use, image, goals, `web_search="disabled"` | No web, browser, desktop or image tools                                                                         |
+| `model_provider`, `forced_login_method`                      | First-party OpenAI provider and ChatGPT sign-in, even if another config layer selects a proxy or API key        |
+| `-m` and `review_model`                                      | Pins Sol or Astra; the second stops a configured review model swapping it                                       |
+| `--sandbox read-only`                                        | OS-enforced: no file writes and no network from shell commands                                                  |
+| `approval_policy="never"`                                    | Blocked actions fail instead of waiting for an approval nobody will give                                        |
+| `--output-schema`                                            | The final message must match the findings schema                                                                |
+| `-` with stdin                                               | The prompt comes from the file; with an argument prompt, exec also waits on stdin                               |
 
 `--ignore-user-config` does not skip system, managed or project config layers,
 and there is no switch that denies all MCP servers. List what those layers add

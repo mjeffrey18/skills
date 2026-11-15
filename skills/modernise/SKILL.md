@@ -39,7 +39,7 @@ base and `git rebase <base>` because gk's rf requires origin; skip remote calls.
    `gk rf --remote` after confirming origin's base is intended. Do not include
    local unpushed base work by accident.
 2. Resolve mechanical conflicts using the rebase skill, including encrypted-file
-   rules. Stop for a product decision when conflicts reveal changed behaviour
+   rules. Skip its fit check; steps 4 and 5 replace it. Stop for a product decision when conflicts reveal changed behaviour
    or invariants; do not invent scope to complete a rebase.
 3. Confirm the resulting base. Use `git range-diff` to compare the original and
    rebased series, then inspect the final feature diff.
@@ -67,6 +67,13 @@ evidence, impact, required or optional status and a recommendation. Present:
   capabilities from the base. Wait for the revised scope to be accepted.
 - **Merge:** the work remains relevant. State remaining delivery steps; local
   checks alone do not establish green CI.
+
+Give the summary and findings as text, then ask for the choice through the
+host's interactive Q&A tool (AskUserQuestion or the harness equivalent) when it
+is available and permitted. Put the recommended option first and say why. Ask
+any earlier blocking decision, such as diverged heads or a conflict that changes
+behaviour, the same way. A preselected choice is not an answer. When no such
+tool is available, ask in prose.
 
 Recommend one option and wait for the user's choice. Perform only the actions
 that choice authorises. Do not invoke user-only full-send or full-stop without

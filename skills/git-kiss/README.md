@@ -1,6 +1,6 @@
 # git-kiss
 
-Version 1
+Version 2
 
 A reference for [git-kiss](https://github.com/mjeffrey18/git-kiss) (`gk`), a small CLI for rebase-based git workflows. It lets your agent start, rebase, squash and finish feature branches, manage worktrees and run deploy commands with the right `gk` command.
 

@@ -32,6 +32,9 @@ Use the CLI path even inside T3 Code when:
   or resuming or forking a CLI session;
 - the user asks for the CLI.
 
+One exception: `review-council` runs Codex as a T3 Code child for its single
+review round. That skill names what it gives up and how it checks the result.
+
 ## Rules for both paths
 
 - Run on Sol or Astra only: `gpt-6.1-sol` (the default) or `gpt-6-astra`.

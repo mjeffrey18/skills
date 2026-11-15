@@ -27,8 +27,9 @@ The entry commands are not installed in their own harness - Claude Code has no
 `review-loop-claude` and Codex no `review-loop-codex` - because a same-product
 review adds little. pi is the exception: `review-loop-pi` in pi is useful when
 the reviewing model differs from the one doing the work; if it is the same
-model, say so and suggest another. Reviews always use the CLI, even inside
-T3 Code. The reviewer skill's `references/cli.md` explains its terms, and its
+model, say so and suggest another. A review loop always uses the CLI, even inside
+T3 Code; only `review-council`, which runs one round, may use T3 Code
+children instead. The reviewer skill's `references/cli.md` explains its terms, and its
 `references/review-rounds.md` the review isolation; read them once: the
 `claude-code`, `codex` or `pi` skill.
 

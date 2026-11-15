@@ -19,6 +19,12 @@ these tests catch the bug". Attack:
   with itself, or re-computes the expected value with the code under test.
 - **Source reading** - a test that greps or parses the source text instead of
   running the behaviour; it passes while the behaviour is broken.
+- **Unprovable is not a pass** - a checker, eval or gate that passes when its
+  evidence is missing, ambiguous or unattributable; a "fails on the old code"
+  baseline that fails for an unrelated reason (an import or build error).
+- **Harness hides the failure** - transaction-wrapped tests that cannot show a
+  rollback, fixtures that skip the code path production takes, and a fixed
+  clock that hides a period edge.
 
 High: the headline behaviour is untested, or a test passes with the bug
 present. Medium: an important branch or error path untested.

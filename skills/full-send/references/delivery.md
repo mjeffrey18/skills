@@ -8,7 +8,8 @@ The caller sets the mode; this reference cannot grant authority on its own.
 Load the git-kiss skill. Require gk and inspect its installed help and effective
 configuration before relying on commands. Record the goal, mode, repository,
 feature branch, head, configured base and its head, PR URL, worktree path and
-ownership, GSD item, checks and cleanup choice. Resolve any mismatch among the
+ownership, GSD item, checks and cleanup choice. Look for an existing PR and
+remote branch of the same name now, read-only. Resolve any mismatch among the
 PR base, GSD base and gk base before changing branches.
 
 Determine whether the repository has a remote before any fetch, pull or push.
@@ -33,7 +34,9 @@ step may also use the repository's clean, idle canonical checkout as specified
 below; this grant does not cover another session's active checkout. Unrelated
 dirty work, an unfinished Git operation, a foreign branch update or unclear
 ownership stops branch mutations. Read-only diagnosis can continue. Never
-bypass a permission denial with another command.
+bypass a denial from the host, harness or repository protection with another
+command. An ordinary operating-system error, such as a missing executable
+bit, is a defect to diagnose, not such a denial.
 
 ## 2. Rebase, verify and prepare GSD close-out
 
@@ -74,10 +77,14 @@ items, the explicit invocation supplies scoped commit and push authority too.
 ## 3. Publish and address PR comments
 
 This and the remote-CI steps apply only to remote delivery. Before publishing
-any new head that may need CI, establish the timed-wake capability in section 4.
-If it is unavailable, stop before the push and report that prerequisite. Do not
-publish first and discover that bounded waiting cannot run afterwards. An
-already-published, unchanged head with green CI needs no wait service.
+any new head that may need CI, choose the wait method in section 4. In T3,
+when the branch has a PR or this delivery will open one, that is the PR
+watch, or for a delegated child the hand-back to its parent; neither needs
+setup before the push, so a first push before the PR exists does not wait
+for one. Elsewhere,
+confirm a background wait that returns on timeout. If none exists, stop before
+the push and report that prerequisite. An already-published, unchanged head
+with green CI needs no wait service.
 
 Publish only the task branch with an explicit refspec:
 `git push origin refs/heads/<feature>:refs/heads/<feature>`.
@@ -90,7 +97,8 @@ and only when that head is the task's own last push. If another writer moved
 the remote branch, stop and reassess. Follow GSD's explicit push checks when
 an item exists. Create or update the repository's PR where its process requires
 one; use its template and draft/ready sequence. In T3, call `link_pull_request`
-as the next tool call after creating, taking over or pushing to each PR.
+as the next tool call after creating, taking over or pushing to each PR. A
+first push has no PR yet, so link straight after creating it.
 
 Read PR review threads, inline comments, top-level comments and review bodies,
 including older unresolved feedback. Follow pagination. Maintain a disposition
@@ -121,7 +129,8 @@ most three consecutive windows per head/run**. Record UTC start, deadlines,
 head and run identifiers, completed windows and service handle before yielding.
 Resume the ledger after compaction or a wake. Unrelated comment events do not
 reset elapsed time. At 15 and 30 minutes, inspect checks and continue only if
-pending. At 45 minutes, intervene; do not start a fourth window.
+pending. At 45 minutes, intervene; do not start a fourth window. Where the host
+wakes on events only, apply these checks on each wake instead.
 
 - Failure or a cancelled required check triggers immediate diagnosis, without
   waiting for the current window to expire.
@@ -133,25 +142,40 @@ pending. At 45 minutes, intervene; do not start a fourth window.
   per delivery invocation, including CI reruns and comment-driven fix/push cycles.
   Count them across changed heads and resumes. Then hand back the blocker.
 
-In T3, first check for a supported timed wake compatible with the host's PR
-watch rules. The current watch API has no timeout field. Do not use shell
-polling, sleeps, Monitor or scheduled tasks as a workaround: the host forbids
-them for PR waits. If no compatible timed wake exists, report the prerequisite
-as blocked before publication; unwatch any existing watch when handing back.
-This host limitation means the requested bounded wait is not currently
-available there. It is not an implemented timer or permission to wait forever.
+In T3 with an open PR, `watch_pull_request` is the wait service. It wakes the
+thread on failed checks, passed required checks, new comments or reviews, and
+conflicts. It has no timeout field, and the host forbids shell polling, sleeps,
+Monitor and scheduled wakes for PR waits. Do not add a timer, and do not treat
+the missing timer as a blocker: publish, then wait on the watch.
 
-Only after a compatible timer is established, record its handle and deadline,
-handle old comments, register parent-owned `watch_pull_request`, then end the
-turn. On an event wake, the watch remains active; do not register another one.
-Re-arm the supported timer for the next window without resetting elapsed time.
-A wake is not a merge decision. Cancel the timer and unwatch on final handoff.
+Before yielding, handle old comments and read the checks once: a run that has
+already passed or failed needs no wait. Otherwise record the UTC start and the
+15, 30 and 45-minute deadlines in the ledger. Register one parent-owned watch. Tell
+the user the 45-minute deadline, and that any message after it resumes the
+delivery, then end the turn. The wake can arrive a few minutes after the checks
+finish. A stalled run that emits no event does not wake the thread; the stated
+deadline is the bound for that case.
 
-Outside T3, use the harness's supported background service with a 900-second
-timeout and a CI-only wait command. It must return on failure and on timeout;
-do not use a readiness watcher that also waits for review bots. If the service
-cannot wake the agent on timeout, report the same blocker. Terminate task-owned
-wait handles on completion or handoff. No live wait is needed to install skills.
+T3 does not let a delegated child watch a PR. A child running this procedure
+instead reports the PR URL, head, check state and ledger to its parent and ends
+its turn. The parent registers the watch, resumes the child on a wake and
+unwatches on final handoff. In stop mode the child hands the merge package to
+its parent, which relays it to the user and awaits the confirmation.
+
+On every wake, whether an event or a user message, the watch remains active;
+do not register another one. Compare the current time with the ledger and count
+the elapsed windows; never restart the clock. Inspect checks, and continue
+waiting only if they are still pending inside 45 minutes. Past 45 minutes with
+checks still pending, run the third-timeout diagnosis. A wake on passed checks
+ends the wait inside the current window; record it. A wake is not a merge
+decision. Unwatch on final handoff.
+
+In T3 when no PR exists and none will be opened, and outside T3, use the harness's supported background
+service with a 900-second timeout and a CI-only wait command. It must return on
+failure and on timeout; do not use a readiness watcher that also waits for
+review bots. If the service cannot wake the agent on timeout, report that as a
+blocker before publication. Terminate task-owned wait handles on completion or
+handoff. No live wait is needed to install skills.
 
 ## 5. Final comment and readiness check
 
@@ -245,6 +269,8 @@ Only after successful merge publication (or local merge), with GSD already close
 stop task-owned wait services. Work from a stable checkout outside the target
 before removing it. Confirm the target is exactly the recorded task-owned
 linked worktree, not the canonical main checkout or another session's checkout.
+A task run in the canonical checkout has nothing to remove or park: leave it on
+the base at the merge commit.
 
 Inspect tracked, untracked and ignored files before removal. Preserve useful
 local-only data; do not discard it merely because ordinary Git status is clean.

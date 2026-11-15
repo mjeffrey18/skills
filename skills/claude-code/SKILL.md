@@ -34,6 +34,9 @@ Use the CLI path even inside T3 Code when:
   session;
 - the user asks for the CLI.
 
+One exception: `review-council` runs Claude Code as a T3 Code child for its single
+review round. That skill names what it gives up and how it checks the result.
+
 ## Rules for both paths
 
 - Run on Opus or Fable only - never Sonnet, Haiku, or the user's configured

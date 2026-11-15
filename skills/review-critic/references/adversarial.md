@@ -21,7 +21,13 @@ wrote it and will argue with your findings, so each one must stand on evidence.
   that would still pass if the fix were removed.
 - Every finding needs evidence: the file:line you read and what you checked, and
   a concrete failure scenario - input or state leads to wrong result. If you
-  cannot construct the failure, it is not a finding.
+  cannot construct the failure, it is not a finding. When a claim rests on how
+  a pattern, regex, escape or tool behaves, run it if you can rather than
+  reasoning about it.
+- Keep the change's own defects apart from the rest. A disagreement with a
+  decision the spec or plan records is a question for its owner, not a
+  defect. A bug that predates the change and sits outside it is a follow-up:
+  say so in `problem` and rate it low unless it is a security hole.
 - Severity: high = wrong behaviour, data loss or corruption, a security hole, or
   an outage path; medium = a likely bug, a spec gap, or a risky assumption with
   a plausible trigger; low = a real but minor problem. No style nits and nothing
@@ -36,16 +42,21 @@ wrote it and will argue with your findings, so each one must stand on evidence.
 Append this in round 2 and later, below the author's notes:
 
 ```markdown
+Attack the fixes first: fixes made under review pressure often break
+something that worked, so check each fix against the earlier examples and
+callers it touches before re-checking the old findings.
+
 The notes above are the author's claims. Verify each against the fixes diff
 line by line: a "fixed" finding stays open unless the diff shows the fix and
 the failure scenario no longer holds. For a "rejected" or "narrowed" finding,
-judge the reason on its merits. If it holds, concede: drop the finding and put
+judge the reason on its merits - "existing code already does this" refutes
+nothing unless that code takes the same path with the same inputs. If it
+holds, concede: drop the finding and put
 its id in `withdrawn`. If it is wrong, return the finding as "contested"
 with a counter-argument in `problem` that answers the author's reason with
 evidence - restating the original finding is not a counter-argument. Both of
 you are after the best outcome for this change - correct, in spec and as simple
 as it can be - not agreement for its own sake and not your original finding. If
 the author's fix is better than yours, say so; if a third option beats both,
-propose it. Then attack the fixes
-themselves - fixes under review pressure often introduce new bugs.
+propose it.
 ```

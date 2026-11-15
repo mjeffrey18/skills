@@ -22,12 +22,12 @@ which uses `--no-ff` merge so feature integration points are visible in history.
 | Command                      | What it does                                          |
 | ---------------------------- | ----------------------------------------------------- |
 | `gk nf {name}`               | New feature branch from base branch                   |
-| `gk rf [--remote]`           | Rebase onto local base, or fetch and use origin/base |
+| `gk rf [--remote]`           | Rebase onto local base, or fetch and use origin/base  |
 | `gk cm "{msg}"`              | Stage all (`git add -A`) and commit                   |
 | `gk rc` / `gk rc!`           | Safely undo the last commit, keeping changes unstaged |
 | `gk pf`                      | Publish feature branch to remote                      |
 | `gk pr "{title}" [gh flags]` | Create pull request via `gh` CLI                      |
-| `gk pr ls`                  | List pull requests for local branches and worktrees |
+| `gk pr ls`                   | List pull requests for local branches and worktrees   |
 | `gk sf` / `gk sf!`           | Squash all feature commits into one                   |
 | `gk ff` / `gk ff!`           | Finish feature — merge into base (`--no-ff`)          |
 | `gk ds` / `gk ds!`           | Deploy feature to staging (force push)                |
@@ -181,16 +181,16 @@ All other `gk` commands (`cm`, `rf`, `pf`, `pr`, etc.) work inside worktrees —
 
 ### Worktree commands
 
-| Command                   | What it does                                                       |
-| ------------------------- | ------------------------------------------------------------------ |
-| `gk wt nf {name}`         | New worktree + feature branch (`feature/{initials}-{name}`)        |
-| `gk wt nb {name}`         | New worktree + plain branch (no prefix/initials)                   |
-| `gk wt ls`                | List all worktrees with branch, path, ahead/behind, dirty state    |
-| `gk wt co [index]`        | Select, or directly choose a displayed index (needs shell-init)    |
+| Command                    | What it does                                                                 |
+| -------------------------- | ---------------------------------------------------------------------------- |
+| `gk wt nf {name}`          | New worktree + feature branch (`feature/{initials}-{name}`)                  |
+| `gk wt nb {name}`          | New worktree + plain branch (no prefix/initials)                             |
+| `gk wt ls`                 | List all worktrees with branch, path, ahead/behind, dirty state              |
+| `gk wt co [index]`         | Select, or directly choose a displayed index (needs shell-init)              |
 | `gk wt copy [index\|name]` | Preview and copy configured files from another worktree into the current one |
-| `gk wt rm <index\|name>`  | Remove worktree, keep branch; prompts if dirty |
-| `gk wt rm! <index\|name>` | Remove worktree without the dirty-tree prompt; delete its merged branch |
-| `gk wt clean` / `clean!`  | Remove merged worktrees; `clean!` also removes dirty ones          |
+| `gk wt rm <index\|name>`   | Remove worktree, keep branch; prompts if dirty                               |
+| `gk wt rm! <index\|name>`  | Remove worktree without the dirty-tree prompt; delete its merged branch      |
+| `gk wt clean` / `clean!`   | Remove merged worktrees; `clean!` also removes dirty ones                    |
 
 ### Removing a worktree
 

@@ -1,6 +1,6 @@
 ---
 name: rebase
-description: Run or finish a git rebase in place and resolve its conflicts, including encrypted files (any .enc file, git-crypt, sops, vault). Use when the user wants a branch rebased (onto main or its upstream), asks to fix rebase conflicts, or is stuck mid-rebase ("continue the rebase", "rebase in progress").
+description: Run or finish a git rebase in place, resolve its conflicts, including encrypted files (any .enc file, git-crypt, sops, vault), then check that the branch still fits its new base. Use when the user wants a branch rebased (onto main or its upstream), asks to fix rebase conflicts, or is stuck mid-rebase ("continue the rebase", "rebase in progress").
 ---
 
 # Rebase
@@ -78,12 +78,36 @@ New conflicts: back to step 2. If it fails without new conflicts, read git's mes
 
 Done: `git status` shows no rebase in progress.
 
-## 6. Verify and report
+## 6. Verify the replay
 
 ```bash
 git range-diff <onto> ORIG_HEAD HEAD   # ORIG_HEAD is the pre-rebase tip; only your resolutions should differ
 ```
 
-Run the project's checks if it has them. Report each conflicted file and how it was resolved, every encrypted-file decision the user made, and the undo command `git reset --hard ORIG_HEAD`.
+Done: range-diff shows only the resolutions you made.
 
-Done: range-diff shows only the resolutions you made, checks pass or the failures are listed, report delivered.
+## 7. Check the branch still fits its new base
+
+A clean replay proves that the text merged, not that the branch still makes sense. Git reports no conflict when upstream adds new code that depends on what the branch replaced, or when upstream solves the same problem in a different place. Skip this step when the base did not move, or when [modernise](../modernise/SKILL.md) is running this skill - its assessment replaces this one.
+
+```bash
+OLD=$(git merge-base ORIG_HEAD <onto>)                  # the base the branch was written against
+git diff --stat <onto>..HEAD                            # what the branch changes
+git log --oneline "$OLD..<onto>"                        # what upstream did that the branch never saw
+git diff -z --name-only <onto>..HEAD | xargs -0 -r git log --oneline "$OLD..<onto>" --   # ...in the branch's own files
+```
+
+Read the upstream commits that touch the branch's files, callers or subject, then look for two kinds of drift:
+
+- **Upstream still uses what the branch replaces.** For each name, signature, key, rule or convention the branch removes, renames or changes, search the rebased tree with `git grep` for uses that upstream added or kept. Example: the branch replaces the permission model and upstream added an endpoint that checks an old permission. The branch is incomplete without these, so bring them to the branch's approach yourself, without a question. Put the fix in a new commit on top; do not fold it into a replayed commit, so the range-diff stays readable.
+- **Upstream changed what the branch changes.** Upstream fixed the same problem, improved the same logic or moved its owner. Example: the branch reworks booking logic and upstream has since improved that logic. Compare both versions against the branch's goal. This is the user's decision, so ask one question with your recommendation and the upstream commit as evidence: keep the branch's version, adopt upstream's and re-apply only what the branch still adds, or drop the branch's commit. Change nothing here until they answer.
+
+Scale the answer to the drift. No drift: say so in one line and ask nothing. A fix larger than the branch's own diff, or outside its subject: ask before you expand the scope. Drift across most of the branch, or a goal that upstream seems to have met already: stop fixing piece by piece and recommend that the user runs `/modernise`, which reassesses the whole branch and offers close, amend or merge. Only the user can invoke it.
+
+Done: every upstream use of replaced code is updated or listed, and each overlap has the user's decision or a `/modernise` recommendation.
+
+## 8. Check and report
+
+Run the project's checks if it has them. Report each conflicted file and how it was resolved, every encrypted-file decision the user made, the fit check (what you adapted and in which commit, what the user decided, or that you found no drift), and the undo command `git reset --hard ORIG_HEAD`.
+
+Done: checks pass or the failures are listed, report delivered.

@@ -7,29 +7,25 @@ thread, and can stop it there.
 
 ## Run the task
 
-1. Call `orchestrator_capabilities` once per thread, before the first
-   `delegate_task`. Confirm that the `pi` provider instance lists the route
-   you need.
-2. Call `delegate_task` with:
+T3 Code supplies the `delegate_task` schema and its own rules: call
+`orchestrator_capabilities` once per thread, do not poll a running child, and
+stop one you no longer need with `task_cancel`. Follow them. This file adds
+only what is specific to pi.
 
-   | Field                       | Value                                                                     |
-   | --------------------------- | ------------------------------------------------------------------------- |
-   | `target.providerInstanceId` | `pi`                                                                      |
-   | `target.model`              | `gateway/<word>` - see [routes](cli.md#routes)                            |
-   | `target.options`            | `{"thinking": "<level>"}` - the level the routes table gives that route   |
-   | `role`                      | `implementation`, `research`, `design`, `test` or `general`               |
-   | `isolation`                 | `worktree` for every write-capable child - see Partial guard below        |
-   | `mode`                      | `async` - local models are slow                                           |
-   | `title`                     | A short name the user will recognise in the thread list                   |
-   | `task`                      | The complete brief - see [SKILL.md](../SKILL.md) for what it must contain |
+| Field                       | Value                                                                     |
+| --------------------------- | ------------------------------------------------------------------------- |
+| `target.providerInstanceId` | `pi`                                                                      |
+| `target.model`              | `gateway/<word>` - see [routes](cli.md#routes)                            |
+| `target.options`            | `{"thinking": "<level>"}` - the level the routes table gives that route   |
+| `isolation`                 | `worktree` for every write-capable child - see Partial guard below        |
+| `mode`                      | `async` - local models are slow                                           |
+| `task`                      | The complete brief - see [SKILL.md](../SKILL.md) for what it must contain |
 
-3. End the turn or carry on with other work. T3 Code wakes you when the
-   child finishes. Do not poll with `task_status`, `sleep` or a watcher. A
-   run on `brain` or `think` can take up to an hour.
-4. Read the result from `summary`, and check that the returned `model` is the
-   route you asked for. Then inspect the changed files in the child's
-   worktree and run the checks. Say where the changes are.
-5. Stop a child you no longer need with `task_cancel`.
+A run on `brain` or `think` can take up to an hour.
+
+Read the result from `summary`, and check that the returned `model` is the
+route you asked for. Then inspect the changed files in the child's worktree
+and run the checks. Say where the changes are.
 
 The T3 catalogue offers one thinking level per route, matching the routes
 table. Set it explicitly: options inherited from a non-pi parent do not

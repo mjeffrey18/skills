@@ -2,7 +2,8 @@
 
 For skills, AGENTS.md/CLAUDE.md, hooks, agent settings, permission rules and
 deploy manifests. The "code" here is instructions and configuration that other
-agents obey. Attack:
+agents obey (a product's own prompts and tools belong to `llm-feature`).
+Attack:
 
 - **Flags and commands** - every CLI flag, command and config key is valid for
   the installed version (check `--help`) and does what the text claims.

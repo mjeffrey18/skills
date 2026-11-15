@@ -1,6 +1,6 @@
 # claude-code
 
-Version 1
+Version 2
 
 Delegate analysis, implementation or review to Claude Code from another agent harness, such as Codex or pi. The skill picks the runtime, writes a bounded task, pins the model to Opus or Fable and checks the result before it is reported.
 

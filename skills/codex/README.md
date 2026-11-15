@@ -1,6 +1,6 @@
 # codex
 
-Version 1
+Version 2
 
 Delegate analysis, implementation or review to the Codex CLI from another agent harness. The skill covers model and reasoning choice, sandbox and approval modes, structured output and resumed sessions.
 

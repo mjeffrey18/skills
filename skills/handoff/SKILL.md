@@ -95,11 +95,11 @@ Current state and point to that handoff.
 
 The hooks call `python3 $HANDOFF hook <event> --harness <name>`:
 
-| Event | Claude Code / Codex | pi / omp | OpenCode |
-| --- | --- | --- | --- |
-| `pre-compact` - write or refresh the draft checkpoint | `PreCompact` | `session_before_compact` | `compaction` session hook |
-| `post-compact` - ask the agent to complete the draft | `SessionStart` with source `compact` | `session_compact` | `session.compaction.ended` event |
-| `session-start` - point at a recent handoff | `SessionStart` | `session_start` | first `context` session hook |
+| Event                                                 | Claude Code / Codex                  | pi / omp                 | OpenCode                         |
+| ----------------------------------------------------- | ------------------------------------ | ------------------------ | -------------------------------- |
+| `pre-compact` - write or refresh the draft checkpoint | `PreCompact`                         | `session_before_compact` | `compaction` session hook        |
+| `post-compact` - ask the agent to complete the draft  | `SessionStart` with source `compact` | `session_compact`        | `session.compaction.ended` event |
+| `session-start` - point at a recent handoff           | `SessionStart`                       | `session_start`          | first `context` session hook     |
 
 Claude Code and Codex register the hooks in their settings; pi and omp need an
 extension, and OpenCode a plugin, that call the same subcommands. Those

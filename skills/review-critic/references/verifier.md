@@ -80,11 +80,11 @@ commands that change state, or start other agents.
    behaviour: style true or false.
 6. Reply with only this JSON object:
    {"id": "<finding id>", "result": "confirmed|refuted|unverifiable",
-    "evidence": "<file:line or section, and what you checked>",
-    "fingerprint": {"path": "<path>", "symbol": "<symbol or *>",
-                    "rule_class": "<class>"},
-    "protected": "no|unsure|security|migration|idempotency|concurrency",
-    "style": true|false}
+   "evidence": "<file:line or section, and what you checked>",
+   "fingerprint": {"path": "<path>", "symbol": "<symbol or *>",
+   "rule_class": "<class>"},
+   "protected": "no|unsure|security|migration|idempotency|concurrency",
+   "style": true|false}
 
 <the finding, verbatim>
 ```
@@ -119,13 +119,13 @@ start other agents.
    - yes: the same failure, and the reason still holds;
    - no: a different failure, or the reason no longer holds - say which;
    - unsure: you cannot tell from the code and the texts.
-   The same function and class is not enough: an earlier finding about
-   empty input to parse() is a different failure from a later one about
-   overflow in parse().
+     The same function and class is not enough: an earlier finding about
+     empty input to parse() is a different failure from a later one about
+     overflow in parse().
 3. Reply with only this JSON object:
    {"id": "<new finding id>", "earlier": "<earlier finding id or settled
     entry source>", "same_failure": "yes|no|unsure",
-    "reason": "<what you compared, and why>"}
+   "reason": "<what you compared, and why>"}
 
 New finding:
 <the new finding, verbatim>

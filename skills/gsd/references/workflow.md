@@ -27,9 +27,11 @@ invocation delegates CP3 acceptance; reuse an explicit close-out method, otherwi
 use Fold and record that default. This does not claim the branch has merged.
 Do not wait for a GitHub review, but address existing PR findings and fetch comments again after green CI. Required internal
 reviews and repository protection still apply. Use three 15-minute pending-CI
-windows with intervention on failure or the third timeout; a host without a
-supported timed wake is a reported prerequisite before publication, not an
-unbounded wait. Comment-driven repairs share the three-cycle CI repair budget.
+windows with intervention on failure or the third timeout. In T3 the PR watch
+is the wait: record the deadlines, state the 45-minute deadline to the user and
+check elapsed time on every wake. Elsewhere, a host without a supported timed
+wake is a reported prerequisite before publication, not an unbounded wait.
+Comment-driven repairs share the three-cycle CI repair budget.
 
 Merge with `gk ff`, inspect the merge parents, then explicitly push and verify
 the base. Linked tasks transfer the tested feature to the clean idle canonical

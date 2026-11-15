@@ -28,10 +28,10 @@ Delegated work, and reviews in particular, runs on one of these two models.
 Pass `-m` on every call; do not inherit the configured model, and do not use a
 lower-tier model (Luna, Terra, older generations) even for small tasks.
 
-| Model | `-m`           | Use                                                        |
-| ----- | -------------- | ---------------------------------------------------------- |
-| Sol   | `gpt-6.1-sol`  | Default for analysis, implementation and review            |
-| Astra | `gpt-6-astra`  | When the user asks for it, or for a large or risky change  |
+| Model | `-m`          | Use                                                       |
+| ----- | ------------- | --------------------------------------------------------- |
+| Sol   | `gpt-6.1-sol` | Default for analysis, implementation and review           |
+| Astra | `gpt-6-astra` | When the user asks for it, or for a large or risky change |
 
 The Sol model ID is confirmed in the [official model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
 Account access has not been tested for this update. Check the live catalogue

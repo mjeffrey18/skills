@@ -7,31 +7,26 @@ its thread, and can stop it there.
 
 ## Run the task
 
-1. Call `orchestrator_capabilities` once per thread, before the first
-   `delegate_task`. Confirm that the `codex` provider instance lists the model
-   you need. Use `codex` (the official provider), not a model gateway or other Codex
-   instance, unless the user names it.
-2. Call `delegate_task` with:
+T3 Code supplies the `delegate_task` schema and its own rules: call
+`orchestrator_capabilities` once per thread, do not poll a running child, and
+stop one you no longer need with `task_cancel`. Follow them. This file adds
+only what is specific to Codex.
 
-   | Field                | Value                                                                                     |
-   | -------------------- | ----------------------------------------------------------------------------------------- |
-   | `target.providerInstanceId` | `codex`                                                                            |
-   | `target.model`       | `gpt-6.1-sol` (default) or `gpt-6-astra`                                                  |
-   | `target.options`     | `{"reasoningEffort": "medium"}` unless the user sets one - see below                       |
-   | `role`               | `implementation`, `research`, `design`, `test` or `general`                               |
-   | `isolation`          | `worktree` for risky or parallel changes; `shared` (the default) otherwise                |
-   | `mode`               | `wait` only when this turn needs the result; `async` otherwise                            |
-   | `title`              | A short name the user will recognise in the thread list                                   |
-   | `task`               | The complete brief - see [SKILL.md](../SKILL.md) for what it must contain                 |
+| Field                       | Value                                                                                      |
+| --------------------------- | ------------------------------------------------------------------------------------------ |
+| `target.providerInstanceId` | `codex` (the official provider), not a model gateway or other Codex instance, unless the user names it |
+| `target.model`              | Sol by default, or Astra - use the ID that `orchestrator_capabilities` lists               |
+| `target.options`            | `{"reasoningEffort": "medium"}` unless the user sets one - see below                       |
+| `isolation`                 | `worktree` for risky or parallel changes; `shared` (the default) otherwise                 |
+| `mode`                      | `wait` only when this turn needs the result; `async` otherwise                             |
+| `task`                      | The complete brief - see [SKILL.md](../SKILL.md) for what it must contain                  |
 
-3. With `async`, end the turn or carry on with other work. T3 Code wakes you
-   when the child finishes. Do not poll with `task_status`, `sleep` or a
-   watcher. With `wait`, a question or approval request from the child ends
-   the wait; answer it or report it.
-4. Read the result from `summary`. Then inspect the changed files and run the
-   checks. For `isolation: worktree`, the changes are in the child's worktree,
-   not your checkout - inspect them there and say where they are.
-5. Stop a child you no longer need with `task_cancel`.
+With `wait`, a question or approval request from the child ends the wait;
+answer it or report it.
+
+Read the result from `summary`. Then inspect the changed files and run the
+checks. For `isolation: worktree`, the changes are in the child's worktree,
+not your checkout - inspect them there and say where they are.
 
 Always set `reasoningEffort`. The T3 catalogue default for `gpt-6.1-sol` is
 `low`, and options inherited from a non-Codex parent do not apply.

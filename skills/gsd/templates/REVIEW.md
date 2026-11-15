@@ -1,5 +1,5 @@
 ---
-updated: { date }
+updated: "{date}"
 version: 1
 ---
 
